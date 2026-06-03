@@ -1,0 +1,43 @@
+# 依赖
+node_modules/
+**/node_modules/
+
+# 构建产物
+frontend/dist/
+frontend/.vite/
+backend/data/
+backend/uploads/
+
+# 环境配置（包含敏感信息）
+.env
+.env.local
+.env.production
+**/.env
+**/.env.local
+
+# 日志
+*.log
+logs/
+backend/logs/
+
+# 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 临时文件
+tmp/
+*.tmp
+*.bak
+
+# 数据库文件（运行时生成）
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 上传目录
+uploads/
