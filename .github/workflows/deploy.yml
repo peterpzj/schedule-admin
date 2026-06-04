@@ -1,0 +1,64 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  deploy:
+    name: Deploy to Tencent Cloud
+    runs-on: ubuntu-latest
+    # 防止并发部署
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          echo "✓ SSH 配置完成"
+
+      - name: Test SSH connection
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=15 \
+              ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+              "echo '✓ SSH 连接成功 - 服务器: $(hostname)'"
+
+      - name: Deploy to server
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+              ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+              "cd /opt/schedule-admin && ./deploy.sh"
+
+      - name: Health check
+        run: |
+          echo "等待 15 秒让服务完全启动..."
+          sleep 15
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ secrets.SERVER_HOST }}/api/health" || echo "000")
+          if [ "$STATUS" = "200" ]; then
+            echo "✓ 部署成功 - API 健康"
+          else
+            echo "⚠️  健康检查返回 HTTP $STATUS"
+            echo "请检查: docker compose logs -f"
+          fi
+
+      - name: Notify
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ 部署成功 @ ${{ github.event.head_commit.timestamp }}"
+            echo "📍 ${{ github.event.head_commit.message }}"
+          else
+            echo "❌ 部署失败"
+            echo "请到 https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} 查看详情"
+          fi

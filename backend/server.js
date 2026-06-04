@@ -29,14 +29,31 @@ const PORT = process.env.PORT || 3000;
 const app = express();
 
 // 安全 + 日志
-app.use(helmet({ crossOriginResourcePolicy: false }));
-app.use(morgan('combined'));
-app.use(cors({
-  origin: true,  // 生产环境应配置具体 origin
-  credentials: true
+app.use(helmet({
+  crossOriginResourcePolicy: false,
+  contentSecurityPolicy: false  // 微信小程序请求不强制 CSP
 }));
+app.use(morgan('combined'));
+
+// CORS 配置
+// 微信小程序在生产环境不需要 CORS（不走浏览器），
+// 但开发时通过 wx.request 调用 HTTPS 接口仍需正确响应头
+app.use(cors({
+  origin: function (origin, callback) {
+    // 允许所有 origin（生产环境如果担心安全可改成白名单）
+    callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  maxAge: 86400  // 预检请求缓存 24h
+}));
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// 信任代理（用于 HTTPS 反代场景）
+app.set('trust proxy', 1);
 
 // 静态资源（管理员后台构建产物可放在 public/）
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -66,11 +83,32 @@ app.get('/api/metadata', async (req, res) => {
 
 // 健康检查
 app.get('/api/health', (req, res) => {
+  const db = getDb();
+  let dbOk = true;
+  try {
+    db.prepare('SELECT 1').get();
+  } catch (e) {
+    dbOk = false;
+  }
   res.json({
     success: true,
     message: 'Schedule Admin API is running',
     version: '1.0.0',
+    db: dbOk ? 'ok' : 'error',
+    uptime: process.uptime(),
     time: new Date().toISOString()
+  });
+});
+
+// API 版本信息（给小程序探活用）
+app.get('/api/version', (req, res) => {
+  res.json({
+    success: true,
+    name: 'schedule-admin-api',
+    version: '1.0.0',
+    apiPrefix: '/api',
+    miniprogramMinVersion: '3.0.0',
+    docs: 'https://github.com/peterpzj/schedule-admin'
   });
 });
 
