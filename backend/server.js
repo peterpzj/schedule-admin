@@ -12,7 +12,7 @@ const morgan = require('morgan');
 const path = require('path');
 require('dotenv').config();
 
-const { initDb } = require('./db');
+const { initDb, getDb } = require('./db');
 
 const authRoutes = require('./routes/auth');
 const campusRoutes = require('./routes/campuses');
