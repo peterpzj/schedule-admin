@@ -73,7 +73,7 @@ app.use('/api/excel', excelRoutes);
 // 聚合接口（一次拿全部基础数据）
 app.get('/api/metadata', async (req, res) => {
   try {
-    const { getAllMetadata } = require('./db');
+    const { getAllMetadata } = require('./db/queries');
     const data = getAllMetadata(req.query);
     res.json({ success: true, ...data });
   } catch (e) {

@@ -85,7 +85,7 @@ else
 fi
 
 # 2) 备份数据库
-echo "[2/6] 备份数据库..."
+echo "[2/7] 备份数据库..."
 if [ -f data/schedule.db ]; then
   BACKUP_NAME="schedule_$(date +%Y%m%d_%H%M%S).db"
   cp data/schedule.db "data/${BACKUP_NAME}"
@@ -94,20 +94,26 @@ if [ -f data/schedule.db ]; then
   find data -name "schedule_*.db" -mtime +14 -delete 2>/dev/null || true
 fi
 
-# 3) 重新构建镜像
-echo "[3/6] 重新构建镜像..."
+# 3) 构建前端（Docker 方式，无需 npm）
+echo "[3/7] 构建前端..."
+docker run --rm -v "$APP_DIR/frontend:/app" -w /app node:18-alpine \
+  sh -c 'npm install && npm run build' 2>&1 | tail -3
+echo "      ✓ 前端构建完成"
+
+# 4) 重新构建镜像
+echo "[4/7] 重新构建镜像..."
 if [ -n "$NO_CACHE" ]; then
   docker compose build $NO_CACHE
 else
   docker compose build
 fi
 
-# 4) 重启服务
-echo "[4/6] 重启服务..."
+# 5) 重启服务
+echo "[5/7] 重启服务..."
 docker compose up -d
 
-# 5) 健康检查（轮询 30 秒）
-echo "[5/6] 健康检查..."
+# 6) 健康检查（轮询 30 秒）
+echo "[6/7] 健康检查..."
 HEALTH_OK=0
 for i in {1..15}; do
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health 2>/dev/null || echo "000")
@@ -120,7 +126,7 @@ for i in {1..15}; do
   sleep 2
 done
 
-# 6) 失败自动回滚
+# 7) 失败自动回滚
 if [ "$HEALTH_OK" != "1" ]; then
   echo -e "${RED}=========================================="
   echo -e "  ❌ 健康检查失败，启动自动回滚"
