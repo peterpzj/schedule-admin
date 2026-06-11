@@ -1,0 +1,102 @@
+/**
+ * 异步导入任务队列
+ *
+ * 背景：5000+ 行的排班导入如果走同步请求，会撞上 30s 网关超时
+ *
+ * 设计：
+ *  - 任务在内存中跟踪（小规模，可换 Redis）；重启后丢失
+ *  - 客户端通过 /api/excel/jobs/:id 轮询进度
+ *  - 每 100ms 更新一次进度（避免日志风暴）
+ *  - 任务支持取消（标记 cancelled，下一轮停止）
+ */
+const { randomUUID } = require('crypto');
+const log = require('./logger');
+
+const JOBS = new Map(); // id -> { id, status, total, processed, inserted, errors, warnings, startedAt, finishedAt, file, cancelRequested }
+
+function createJob(meta) {
+  const id = randomUUID();
+  const job = {
+    id,
+    status: 'pending',  // pending | running | completed | failed | cancelled
+    total: 0,
+    processed: 0,
+    inserted: 0,
+    failed: 0,
+    errors: [],
+    warnings: [],     // FK 预校验等非阻断告警
+    startedAt: Date.now(),
+    finishedAt: null,
+    cancelRequested: false,
+    ...meta
+  };
+  JOBS.set(id, job);
+  // 1 小时后自动清理（避免内存膨胀）
+  setTimeout(() => JOBS.delete(id), 60 * 60 * 1000).unref?.();
+  return job;
+}
+
+function getJob(id) {
+  return JOBS.get(id);
+}
+
+function listJobs() {
+  return Array.from(JOBS.values()).slice(-20);
+}
+
+function cancelJob(id) {
+  const j = JOBS.get(id);
+  if (!j) return false;
+  j.cancelRequested = true;
+  return true;
+}
+
+function setProgress(job, processed, total, inserted, failed) {
+  if (job.cancelRequested) {
+    const e = new Error('cancelled');
+    e.cancelled = true;
+    throw e;
+  }
+  job.processed = processed;
+  job.total = total;
+  if (typeof inserted === 'number') job.inserted = inserted;
+  if (typeof failed === 'number') job.failed = failed;
+  log.info('import.job.progress', {
+    jobId: job.id,
+    processed,
+    total,
+    inserted: job.inserted,
+    failed: job.failed
+  });
+}
+
+function completeJob(job, extra) {
+  job.status = job.cancelRequested ? 'cancelled' : 'completed';
+  job.finishedAt = Date.now();
+  Object.assign(job, extra || {});
+  log.info('import.job.completed', {
+    jobId: job.id,
+    status: job.status,
+    processed: job.processed,
+    inserted: job.inserted,
+    failed: job.failed,
+    durationMs: job.finishedAt - job.startedAt
+  });
+}
+
+function failJob(job, err) {
+  job.status = 'failed';
+  job.finishedAt = Date.now();
+  job.errors.push({ msg: err && err.message || String(err) });
+  log.error('import.job.failed', { jobId: job.id }, err);
+}
+
+module.exports = {
+  createJob,
+  getJob,
+  listJobs,
+  cancelJob,
+  setProgress,
+  completeJob,
+  failJob
+};

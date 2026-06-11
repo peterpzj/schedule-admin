@@ -20,6 +20,18 @@ services:
       - UPLOAD_DIR=/app/uploads
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+      - LOGIN_RATE_LIMIT=${LOGIN_RATE_LIMIT:-5}
+      - LOGIN_RATE_WINDOW=${LOGIN_RATE_WINDOW:-15m}
+      - CREATE_USER_RATE_LIMIT=${CREATE_USER_RATE_LIMIT:-10}
+      - CREATE_USER_RATE_WINDOW=${CREATE_USER_RATE_WINDOW:-1h}
+      - GLOBAL_RATE_LIMIT=${GLOBAL_RATE_LIMIT:-600}
+      - GLOBAL_RATE_WINDOW=${GLOBAL_RATE_WINDOW:-10m}
+      # #P0-2 修复：登录失败桶 / token 黑名单 / 限流桶 走持久化 KV 存储
+      #   - sqlite：跨进程 + 跨重启保留（多实例部署 / 重启防绕过）
+      #   - 默认 memory 适合单实例 + 测试；生产强烈建议 sqlite
+      - STORE_BACKEND=${STORE_BACKEND:-sqlite}
+      - STORE_SQLITE_PATH=${STORE_SQLITE_PATH:-/app/data/store.db}
     networks:
       - schedule-net
     healthcheck:

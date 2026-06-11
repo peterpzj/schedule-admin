@@ -1,0 +1,24 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+.env
+.env.local
+data/*.db
+data/*.db-shm
+data/*.db-wal
+uploads/*
+!uploads/.gitkeep
+coverage
+.nyc_output
+*.log
+.DS_Store
+.vscode
+.idea
+*.md
+!README.md
+# #P0-6 测试基建：test 目录 + .test.js 必须打进 test stage（构建 --target=test 时）
+# runtime stage 通过 --target 选择性排除
+.dockerignore
+Dockerfile
+docker-compose*.yml

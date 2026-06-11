@@ -289,10 +289,25 @@ docker compose exec backend cat /app/data/schedule.db > backup.db
 
 ## 🔐 部署后必须做的事
 
-1. ⚠️  立即修改默认密码 `admin/admin123`
-2. ⚠️  在 Web 后台「系统设置」创建自己的账号并禁用 `admin`
-3. 启用 HTTPS（bootstrap.sh 已自动处理）
-4. 配置定期备份 cron
+1. ⚠️  **设置强 JWT 密钥**（`./.env`）
+   ```bash
+   openssl rand -base64 48
+   # 把输出粘贴到 .env 的 JWT_SECRET= 后面
+   ```
+   后端启动会校验：未设置 / 仍是占位 / 长度 < 32 直接退出。
+
+2. ⚠️  **配置 CORS 白名单**（`./.env`）
+   ```
+   ALLOWED_ORIGINS=https://admin.your-domain.com,https://api.your-domain.com
+   ```
+   留空 = 只放行同源 / 无 origin（小程序）。`/api/health` 永远放行。
+
+3. ⚠️  立即修改默认密码 `admin/admin123`
+4. ⚠️  在 Web 后台「系统设置」创建自己的账号并禁用 `admin`
+5. 启用 HTTPS（bootstrap.sh 已自动处理）
+6. 配置定期备份 cron
+7. 验证：`curl https://api.your-domain.com/api/health` 应返回
+   `{"dbWritable":true,"jwtSecretOk":true,...}`
 
 ## 🚨 常见问题
 

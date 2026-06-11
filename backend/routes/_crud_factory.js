@@ -5,7 +5,50 @@
 const express = require('express');
 const { getDb } = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const requireRole = require('../middleware/requireRole');
 const { audit } = require('../middleware/audit');
+const { ERR, biz } = require('../lib/errors');
+const { PERMISSIONS } = require('../lib/roles');
+
+/**
+ * 删除引用关系表：table → [{ refTable, refColumn, lookupColumn }]
+ *   - lookupColumn 是被删记录里用来比对引用表的列（默认 'code'，doctors 用 'id'）
+ *   - schedules 没有直接 FK，但 room_id/time_slot_code/campus_code/doctor_id 都是语义引用
+ *     所以只要被删的表是 rooms/zones/campuses/doctors/time_slots/clinic_types，
+ *     都要去 schedules 查引用
+ *
+ * 注：故意不查 doctors.time_slot_code / rooms.time_slot_code 这种复合外键，
+ *     schedules 表里 room_id / time_slot_code 是文本字段、不是 FK，无法在 ON DELETE CASCADE 里联动。
+ *     真正安全的做法是事务里先 SELECT count + DELETE 一起做。
+ */
+// #P1-13 修复：补全跨表级联引用检查
+//   - 任何时候先查"直接子表"再查"孙表"（zones → schedules + rooms；campuses → schedules + time_slots；departments → doctors）
+const REFERENCE_CHECKS = {
+  campuses: [
+    { refTable: 'schedules',   refColumn: 'campus_code' },
+    { refTable: 'time_slots',  refColumn: 'campus_code' }
+  ],
+  zones: [
+    { refTable: 'schedules',   refColumn: 'zone_code' },
+    { refTable: 'rooms',       refColumn: 'zone_code' }
+  ],
+  rooms: [
+    { refTable: 'schedules',   refColumn: 'room_id' }
+  ],
+  doctors: [
+    { refTable: 'schedules',   refColumn: 'doctor_id' }
+  ],
+  time_slots: [
+    { refTable: 'schedules',   refColumn: 'time_slot_code' }
+  ],
+  clinic_types: [
+    { refTable: 'time_slots',  refColumn: 'clinic_type_code' }
+  ],
+  // departments 是医生表的逻辑父表（doctors.department = departments.name）
+  departments: [
+    { refTable: 'doctors',     refColumn: 'department' }
+  ]
+};
 
 /**
  * 创建标准 CRUD 路由
@@ -64,42 +107,72 @@ function createCrudRouter(table, config = {}) {
           return res.status(400).json({ success: false, error: '缺少字段：' + f });
         }
       }
+      // 有 allowedFields 配置时，只插入白名单内的字段（忽略 body 其他字段）
+      const fields = allowedFields;
+      const placeholders = fields.map(() => '?').join(',');
+      const values = fields.map(f => body[f] ?? null);
+      try {
+        const info = getDb().prepare(
+          'INSERT INTO ' + table + ' (' + fields.join(',') + ') VALUES (' + placeholders + ')'
+        ).run(...values);
+        audit(req.user.id, req.user.username, 'create', entity, info.lastInsertRowid, body, req.ip);
+        res.json({ success: true, id: info.lastInsertRowid });
+      } catch (e) {
+        res.status(400).json({ success: false, error: e.message });
+      }
+      return;
     }
-    const fields = allowedFields.length > 0 ? allowedFields : Object.keys(body);
-    const placeholders = fields.map(() => '?').join(',');
-    const values = fields.map(f => body[f] ?? null);
-    try {
-      const info = getDb().prepare(
-        'INSERT INTO ' + table + ' (' + fields.join(',') + ') VALUES (' + placeholders + ')'
-      ).run(...values);
-      audit(req.user.id, req.user.username, 'create', entity, info.lastInsertRowid, body, req.ip);
-      res.json({ success: true, id: info.lastInsertRowid });
-    } catch (e) {
-      res.status(400).json({ success: false, error: e.message });
-    }
+    // 无 allowedFields 配置时拒绝写入（防止意外全字段可写）
+    res.status(400).json({ success: false, error: '该接口未配置可写字段，禁止写入' });
   });
 
   // 修改
   router.put('/:id', requireAuth, (req, res) => {
     const body = req.body || {};
-    const fields = allowedFields.length > 0 ? allowedFields : Object.keys(body);
-    const sets = fields.map(f => f + ' = ?').join(',');
-    const values = fields.map(f => body[f] ?? null);
-    values.push(req.params.id);
-    try {
-      const info = getDb().prepare('UPDATE ' + table + ' SET ' + sets + ' WHERE id = ?').run(...values);
-      audit(req.user.id, req.user.username, 'update', entity, req.params.id, body, req.ip);
-      res.json({ success: true, updated: info.changes });
-    } catch (e) {
-      res.status(400).json({ success: false, error: e.message });
+    if (allowedFields.length > 0) {
+      const fields = allowedFields;
+      const sets = fields.map(f => f + ' = ?').join(',');
+      const values = fields.map(f => body[f] ?? null);
+      values.push(req.params.id);
+      try {
+        const info = getDb().prepare('UPDATE ' + table + ' SET ' + sets + ' WHERE id = ?').run(...values);
+        audit(req.user.id, req.user.username, 'update', entity, req.params.id, body, req.ip);
+        res.json({ success: true, updated: info.changes });
+      } catch (e) {
+        res.status(400).json({ success: false, error: e.message });
+      }
+      return;
     }
+    res.status(400).json({ success: false, error: '该接口未配置可写字段，禁止写入' });
   });
 
-  // 删除
-  router.delete('/:id', requireAuth, (req, res) => {
-    if (req.user.role !== 'admin') return res.status(403).json({ success: false, error: '无权限' });
+  // 删除（仅 admin）
+  router.delete('/:id', requireAuth, requireRole(PERMISSIONS.ADMIN_SYSTEM), (req, res) => {
+    const db = getDb();
     try {
-      const info = getDb().prepare('DELETE FROM ' + table + ' WHERE id = ?').run(req.params.id);
+      // 1) 取被删记录的 lookup 字段（用 code；doctors 用 id 已在 lookupColumn 体现）
+      const row = db.prepare('SELECT * FROM ' + table + ' WHERE id = ?').get(req.params.id);
+      if (!row) return res.status(404).json({ success: false, error: '记录不存在' });
+
+      // 2) 查引用：表里配置的每条规则 count > 0 就报错
+      const refs = REFERENCE_CHECKS[table] || [];
+      for (const ref of refs) {
+        const lookupValue = row.code != null ? row.code : row.id;
+        const count = db.prepare(
+          'SELECT COUNT(*) AS c FROM ' + ref.refTable + ' WHERE ' + ref.refColumn + ' = ?'
+        ).get(lookupValue).c;
+        if (count > 0) {
+          return res.status(409).json({
+            success: false,
+            code: ERR.META_HAS_REFERENCES.code,
+            error: ERR.META_HAS_REFERENCES.message,
+            details: { refTable: ref.refTable, refColumn: ref.refColumn, refCount: count }
+          });
+        }
+      }
+
+      // 3) 真删
+      const info = db.prepare('DELETE FROM ' + table + ' WHERE id = ?').run(req.params.id);
       audit(req.user.id, req.user.username, 'delete', entity, req.params.id, null, req.ip);
       res.json({ success: true, deleted: info.changes });
     } catch (e) {

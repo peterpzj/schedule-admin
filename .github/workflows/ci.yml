@@ -21,7 +21,42 @@ jobs:
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
       - run: npm install
-      - run: node -c server.js && node -c db/index.js && echo "✓ 语法 OK"
+      - name: 语法检查
+        run: |
+          for f in $(find routes middleware lib db -name '*.js' -not -path '*/node_modules/*'); do
+            node -c "$f" || { echo "✗ 语法错误: $f"; exit 1; }
+          done
+          echo "✓ 语法 OK"
+      - name: ESLint (best-effort)
+        run: |
+          if [ -f .eslintrc.json ] || [ -f .eslintrc.js ]; then
+            npx --no-install eslint . || echo "::warning::ESLint 警告"
+          else
+            echo "⊘ 无 ESLint 配置，跳过"
+          fi
+
+  test-backend:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+      - run: npm install
+      - name: 单元测试
+        run: |
+          if ls test/*.test.js lib/__tests__/*.test.js 2>/dev/null | head -1 > /dev/null; then
+            set -a; source ../.env.test 2>/dev/null || true; set +a
+            npx --no-install jest --runInBand --passWithNoTests || exit 1
+          else
+            echo "⊘ 暂无测试用例"
+          fi
 
   lint-frontend:
     name: Frontend Build
@@ -38,3 +73,11 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm install
       - run: npm run build
+      - name: 体积检查
+        run: |
+          SIZE=$(du -sk dist | awk '{print $1}')
+          echo "dist 大小: ${SIZE}KB"
+          if [ "$SIZE" -gt 5120 ]; then
+            echo "::error::dist 超过 5MB，请检查是否引入了未使用的依赖"
+            exit 1
+          fi

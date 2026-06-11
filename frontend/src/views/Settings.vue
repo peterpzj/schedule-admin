@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div class="view-wrap">
     <el-row :gutter="20">
       <el-col :span="12">
         <el-card header="修改密码">

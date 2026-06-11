@@ -1,25 +1,733 @@
-/* 绿色主题全局样式 */
+/* ================================================================
+   诊室排班管理后台 - 专业医疗风格设计系统 v2.0
+   基于 UI/UX Pro Max 设计原则
+   ================================================================ */
 
+/* ===== 设计令牌 ===== */
 :root {
-  --brand-primary: #2e7d32;
-  --brand-primary-light: #4caf50;
-  --brand-primary-dark: #1b5e20;
-  --brand-success: #52c41a;
-  --brand-gradient: linear-gradient(135deg, #11998e 0%, #38a169 50%, #68d391 100%);
-  --bg-page: #f0f5f1;
-  --shadow-sm: 0 2rpx 8rpx rgba(0, 0, 0, 0.04);
+  /* 主色：深青蓝（沉稳专业医疗感）*/
+  --color-primary:       #0369a1;
+  --color-primary-light: #0ea5e9;
+  --color-primary-dark:  #075985;
+  --color-primary-bg:    #f0f9ff;
+  --color-primary-active: #0284c7;
+
+  /* 强调色：琥珀金 */
+  --color-accent:        #d97706;
+  --color-accent-bg:     #fffbeb;
+
+  /* 成功/警告/危险 */
+  --color-success:       #059669;
+  --color-success-light:  #d1fae5;
+  --color-warning:       #d97706;
+  --color-warning-light:  #fef3c7;
+  --color-danger:        #dc2626;
+  --color-danger-light:  #fee2e2;
+  --color-info:          #2563eb;
+  --color-info-light:    #dbeafe;
+
+  /* 背景层级 */
+  --bg-base:    #f1f5f9;
+  --bg-card:    #FFFFFF;
+  --bg-hover:   #f8fafc;
+  --bg-muted:   #e2e8f0;
+  --bg-sidebar: #0f172a;
+  --bg-overlay: rgba(15, 23, 42, 0.6);
+
+  /* 文字层级 */
+  --text-primary:   #0f172a;
+  --text-secondary: #334155;
+  --text-muted:     #64748b;
+  --text-disabled:  #94a3b8;
+
+  /* 边框 */
+  --border-light: #e2e8f0;
+  --border-base:  #cbd5e1;
+  --border-focus: #0369a1;
+
+  /* 阴影层级（从轻到重）- Material Elevation Scale */
+  --shadow-xs:  0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-sm:  0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md:  0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --shadow-lg:  0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.05);
+  --shadow-xl:  0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.06);
+  --shadow-card: 0 2px 8px rgba(3, 105, 161, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  --shadow-card-hover: 0 8px 24px rgba(3, 105, 161, 0.15), 0 0 0 1px rgba(3, 105, 161, 0.1);
+
+  /* 圆角 */
+  --radius-xs:   4px;
+  --radius-sm:   6px;
+  --radius-md:   10px;
+  --radius-lg:   14px;
+  --radius-xl:   18px;
+  --radius-full: 9999px;
+
+  /* 过渡 - 符合 150-300ms 动效规范 */
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in:     cubic-bezier(0.4, 0, 1, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast:   0.12s;
+  --duration-base:   0.2s;
+  --duration-slow:   0.35s;
+
+  /* Z-Index 层级 */
+  --z-dropdown:  100;
+  --z-sticky:    200;
+  --z-modal:     300;
+  --z-popover:   400;
+  --z-tooltip:   500;
 }
+
+*, *::before, *::after { box-sizing: border-box; }
 
 html, body, #app {
   height: 100%;
   margin: 0;
   padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  background: var(--bg-page);
-  color: #333;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+              "Hiragino Sans GB", "Microsoft YaHei", "Fira Sans", sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+  line-height: 1.5;
+  scroll-behavior: smooth;
 }
 
-/* 滚动条美化 */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #bdc8c1; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #8b9c93; }
+/* #P1-D1: 数字 / 工号 / 表格 ID 字段用 Fira Code（等宽数字 + 数字辨识度高）
+   用法：直接加 .num 类；或自动应用于 metric-card / 表格 .id 列 */
+.font-mono, .num, .metric-card__value {
+  font-family: "Fira Code", "SF Mono", "Menlo", "Consolas", monospace;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  letter-spacing: -0.2px;
+}
+
+a { color: var(--color-primary); text-decoration: none; }
+a:hover { color: var(--color-primary-dark); }
+
+/* #P2-T2 鼠标指针：所有"可点击"元素都加 cursor: pointer
+   - 鼠标移上去立刻知道"可以点"
+   - 防止误以为 div 是装饰 */
+a, button, [role="button"], [role="menuitem"],
+.stat-card, .quick-btn, .metric-card,
+.campus-group__header, .zone-item,
+.el-menu-item, .el-button {
+  cursor: pointer;
+}
+
+/* 禁用态指针：明确告诉用户"现在不能点" */
+button:disabled, [aria-disabled="true"], .is-disabled {
+  cursor: not-allowed;
+}
+
+/* ===== 滚动条 ===== */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: var(--radius-full); }
+::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+/* ===== 通用工具类 ===== */
+.font-mono { font-family: 'SF Mono', 'Menlo', monospace; font-variant-numeric: tabular-nums; }
+.text-primary   { color: var(--text-primary) !important; }
+.text-secondary { color: var(--text-secondary) !important; }
+.text-muted     { color: var(--text-muted) !important; }
+.text-brand     { color: var(--color-primary) !important; }
+.text-success   { color: var(--color-success) !important; }
+.text-warning   { color: var(--color-warning) !important; }
+.text-danger    { color: var(--color-danger) !important; }
+.text-xs  { font-size: 11px; }
+.text-sm  { font-size: 12px; }
+.text-base { font-size: 14px; }
+.text-lg  { font-size: 16px; }
+.text-xl  { font-size: 18px; }
+.text-2xl { font-size: 22px; }
+.text-3xl { font-size: 28px; }
+.fw-400 { font-weight: 400; }
+.fw-500 { font-weight: 500; }
+.fw-600 { font-weight: 600; }
+.fw-700 { font-weight: 700; }
+.flex       { display: flex; }
+.flex-1     { flex: 1; }
+.flex-wrap  { flex-wrap: wrap; }
+.items-center { align-items: center; }
+.items-start  { align-items: flex-start; }
+.justify-between { justify-content: space-between; }
+.justify-center  { justify-content: center; }
+.gap-4  { gap: 4px; }
+.gap-8  { gap: 8px; }
+.gap-12 { gap: 12px; }
+.gap-16 { gap: 16px; }
+.gap-20 { gap: 20px; }
+.gap-24 { gap: 24px; }
+.mt-4  { margin-top: 4px; }
+.mt-8  { margin-top: 8px; }
+.mt-12 { margin-top: 12px; }
+.mt-16 { margin-top: 16px; }
+.mt-20 { margin-top: 20px; }
+.mt-24 { margin-top: 24px; }
+.mb-4  { margin-bottom: 4px; }
+.mb-8  { margin-bottom: 8px; }
+.mb-12 { margin-bottom: 12px; }
+.mb-16 { margin-bottom: 16px; }
+.mb-20 { margin-bottom: 20px; }
+.mb-24 { margin-bottom: 24px; }
+.p-16  { padding: 16px; }
+.p-20  { padding: 20px; }
+.p-24  { padding: 24px; }
+.rounded-sm { border-radius: var(--radius-sm); }
+.rounded-md { border-radius: var(--radius-md); }
+.rounded-lg { border-radius: var(--radius-lg); }
+.rounded-xl { border-radius: var(--radius-xl); }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ===== Element Plus 覆盖 ===== */
+
+/* 按钮 - 主色变深青蓝 */
+.el-button--primary {
+  --el-button-bg-color: var(--color-primary);
+  --el-button-border-color: var(--color-primary);
+  --el-button-hover-bg-color: var(--color-primary-light);
+  --el-button-hover-border-color: var(--color-primary-light);
+  --el-button-active-bg-color: var(--color-primary-active);
+  --el-button-active-border-color: var(--color-primary-active);
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  transition: all var(--duration-fast) var(--ease-out);
+  letter-spacing: 0.3px;
+}
+.el-button--primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(3, 105, 161, 0.35);
+}
+.el-button--primary:active { transform: translateY(0); }
+.el-button--primary.is-disabled {
+  opacity: 0.5;
+  transform: none;
+  box-shadow: none;
+}
+
+/* 卡片 */
+.el-card {
+  border-radius: var(--radius-lg) !important;
+  border: 1px solid var(--border-light) !important;
+  box-shadow: var(--shadow-card) !important;
+  transition: box-shadow var(--duration-base) var(--ease-out),
+              transform var(--duration-base) var(--ease-out),
+              border-color var(--duration-base);
+  overflow: hidden;
+  background: var(--bg-card);
+}
+.el-card:hover {
+  box-shadow: var(--shadow-card-hover) !important;
+  transform: translateY(-2px);
+  border-color: rgba(3, 105, 161, 0.2);
+}
+.el-card__header {
+  padding: 16px 20px !important;
+  border-bottom: 1px solid var(--border-light) !important;
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--text-primary);
+  background: transparent;
+  letter-spacing: 0.2px;
+}
+
+/* 表格 */
+.el-table {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  --el-table-border-color: var(--border-light);
+  font-size: 13px;
+  --el-table-header-bg-color: var(--bg-muted);
+  --el-table-row-hover-bg-color: var(--bg-hover);
+  --el-table-current-row-bg-color: var(--color-primary-bg);
+}
+.el-table th.el-table__cell {
+  background: var(--bg-muted) !important;
+  color: var(--text-secondary) !important;
+  font-weight: 700 !important;
+  font-size: 11.5px !important;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  padding: 12px 16px !important;
+  border-bottom: 1px solid var(--border-base) !important;
+}
+.el-table td.el-table__cell {
+  padding: 12px 16px !important;
+  border-bottom: 1px solid var(--border-light) !important;
+  color: var(--text-primary);
+  transition: background var(--duration-fast);
+  font-size: 13px;
+  /* #问题1 修复：禁止表格单元格软换行，避免长 ID/三位数序号被竖排 */
+  white-space: nowrap;
+}
+.el-table__row:hover > td { background: var(--bg-hover) !important; }
+.el-table__row:last-child > td { border-bottom: none !important; }
+.el-table--striped .el-table__body tr.el-table__row--striped td { background: #fafcfb; }
+.el-table__empty-text { color: var(--text-muted); font-size: 13px; padding: 48px 0; }
+.el-table--striped .el-table__body tr.el-table__row--striped:hover > td { background: var(--bg-hover) !important; }
+
+/* 分页 */
+.el-pagination {
+  justify-content: flex-end;
+  margin-top: 20px;
+  font-size: 13px;
+  padding: 8px 0;
+}
+.el-pagination.is-background .el-pager li {
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  min-width: 32px;
+  height: 32px;
+  line-height: 32px;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+.el-pagination.is-background .el-pager li:hover {
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+}
+.el-pagination.is-background .el-pager li.is-active {
+  background: var(--color-primary);
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 2px 8px rgba(3, 105, 161, 0.3);
+}
+.el-pagination.is-background .btn-prev,
+.el-pagination.is-background .btn-next {
+  border-radius: var(--radius-sm);
+  min-width: 32px;
+  height: 32px;
+}
+
+/* 对话框 */
+.el-dialog {
+  border-radius: var(--radius-xl) !important;
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+  box-shadow: var(--shadow-xl);
+  backdrop-filter: blur(8px);
+}
+.el-dialog__header {
+  padding: 20px 24px 16px !important;
+  margin: 0 !important;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-light);
+}
+.el-dialog__title {
+  font-weight: 700 !important;
+  font-size: 16px !important;
+  color: var(--text-primary);
+  letter-spacing: 0.3px;
+}
+.el-dialog__body { padding: 24px !important; }
+.el-dialog__footer {
+  padding: 16px 24px 20px !important;
+  border-top: 1px solid var(--border-light);
+  background: var(--bg-hover);
+}
+
+/* 表单 */
+.el-form-item__label {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 13px;
+  letter-spacing: 0.2px;
+}
+.el-form-item__error {
+  font-size: 11.5px;
+  padding-top: 4px;
+}
+.el-input__wrapper {
+  border-radius: var(--radius-sm) !important;
+  box-shadow: 0 0 0 1px var(--border-base) !important;
+  transition: all var(--duration-fast) var(--ease-out);
+  padding: 0 12px !important;
+}
+.el-input__wrapper:hover { box-shadow: 0 0 0 1px var(--color-primary-light) !important; }
+.el-input__wrapper.is-focus { box-shadow: 0 0 0 2px rgba(3, 105, 161, 0.2) !important; }
+.el-input__wrapper.is-focus .el-input__inner { color: var(--text-primary); }
+.el-input__inner { font-size: 13.5px; }
+.el-select .el-input__wrapper { border-radius: var(--radius-sm) !important; }
+
+/* 标签 */
+.el-tag {
+  border-radius: var(--radius-xs);
+  font-weight: 500;
+  font-size: 11px;
+  padding: 0 6px;
+  height: 22px;
+  line-height: 20px;
+}
+
+/* 下拉菜单 */
+.el-dropdown-menu {
+  border-radius: var(--radius-md) !important;
+  border: 1px solid var(--border-light) !important;
+  box-shadow: var(--shadow-lg) !important;
+  padding: 4px !important;
+  overflow: hidden;
+}
+.el-dropdown-menu__item {
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  padding: 8px 12px;
+}
+.el-dropdown-menu__item:hover {
+  background: var(--bg-hover);
+  color: var(--color-primary);
+}
+
+/* ===== 动画 ===== */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* 渐入效果 */
+.fade-up   { animation: fadeUp 0.35s var(--ease-out) both; }
+.fade-in   { animation: fadeIn 0.25s var(--ease-out) both; }
+.slide-in  { animation: slideInLeft 0.3s var(--ease-out) both; }
+.pulse     { animation: pulse 1.5s ease-in-out infinite; }
+
+/* 交错动画（子元素 stagger）*/
+.stagger-children > *:nth-child(1) { animation-delay: 0ms; }
+.stagger-children > *:nth-child(2) { animation-delay: 60ms; }
+.stagger-children > *:nth-child(3) { animation-delay: 120ms; }
+.stagger-children > *:nth-child(4) { animation-delay: 180ms; }
+.stagger-children > *:nth-child(5) { animation-delay: 240ms; }
+.stagger-children > *:nth-child(6) { animation-delay: 300ms; }
+
+/* Loading骨架屏 */
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-muted) 25%, var(--bg-hover) 50%, var(--bg-muted) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: var(--radius-sm);
+}
+
+/* 页面过渡 */
+.page-enter-active, .page-leave-active {
+  transition: opacity 0.2s var(--ease-out), transform 0.2s var(--ease-out);
+}
+.page-enter-from { opacity: 0; transform: translateY(6px); }
+.page-leave-to   { opacity: 0; transform: translateY(-4px); }
+
+/* ===== 通用面板卡片 ===== */
+.panel {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-light);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow var(--duration-base) var(--ease-out),
+              transform var(--duration-base) var(--ease-out);
+}
+.panel:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-light);
+}
+.panel-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.panel-title::before {
+  content: '';
+  display: block;
+  width: 3px;
+  height: 14px;
+  background: var(--color-primary);
+  border-radius: 2px;
+}
+.panel-body { padding: 20px; }
+
+/* ===== 空状态 ===== */
+.empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-muted);
+}
+.empty-icon { font-size: 56px; margin-bottom: 12px; opacity: 0.5; }
+.empty-text { font-size: 14px; margin-bottom: 16px; }
+
+/* ===== 徽章/标签 ===== */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 600;
+}
+.badge--success { background: #d1fae5; color: #065f46; }
+.badge--warning { background: #fef3c7; color: #92400e; }
+.badge--danger  { background: #fee2e2; color: #991b1b; }
+.badge--info    { background: #dbeafe; color: #1e40af; }
+.badge--muted   { background: var(--bg-muted); color: var(--text-secondary); }
+
+/* ===== 指标卡 ===== */
+.metric-card {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-light);
+  box-shadow: var(--shadow-sm);
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  cursor: pointer;
+  transition: all var(--duration-base) var(--ease-out);
+  overflow: hidden;
+  position: relative;
+}
+.metric-card::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 4px;
+  background: var(--color-primary);
+  border-radius: var(--radius-full) 0 0 var(--radius-full);
+}
+.metric-card:hover {
+  box-shadow: var(--shadow-lg);
+  transform: translateY(-2px);
+  border-color: rgba(13, 148, 136, 0.2);
+}
+.metric-card__icon {
+  font-size: 36px;
+  line-height: 1;
+  opacity: 0.9;
+  flex-shrink: 0;
+}
+.metric-card__body { flex: 1; min-width: 0; }
+.metric-card__value {
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.metric-card__label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.metric-card__arrow { font-size: 20px; color: var(--text-disabled); margin-left: auto; }
+
+/* ===== 页面容器 ===== */
+.view-wrap { padding: 0 24px 24px; max-width: 1500px; margin: 0 auto; }
+
+/* =====================================================
+   #P2 ux-pro-max 增强：a11y + 动效
+   ===================================================== */
+
+/* 可访问性：键盘焦点环
+   - 默认浏览器 outline 不好看
+   - 保留 :focus-visible（仅键盘焦点显示，鼠标点击不显示） */
+*:focus { outline: none; }
+*:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+  transition: outline-offset 0.15s var(--ease-out);
+}
+
+/* 元素 plus 内置组件的 focus-visible 适配 */
+.el-input__wrapper.is-focus,
+.el-select.is-focus .el-input__wrapper,
+.el-textarea__inner:focus {
+  outline: none;  /* 已有 2px box-shadow，重复 */
+}
+.el-button:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* 跳过导航链接 (a11y) - 隐藏在屏幕外，键盘 Tab 显示 */
+.skip-link {
+  position: absolute;
+  top: -100px; left: 8px;
+  z-index: 99999;
+  padding: 10px 16px;
+  background: var(--color-primary);
+  color: #fff;
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  transition: top 0.2s var(--ease-out);
+}
+.skip-link:focus { top: 8px; color: #fff; }
+
+/* 触屏目标：移动端最小 44x44px */
+@media (max-width: 768px) {
+  .el-button { min-height: 36px; }
+  .el-menu-item { min-height: 44px !important; }
+  .metric-card { min-height: 80px; padding: 16px; }
+  .stat-card { min-height: 80px; }
+}
+
+/* 屏幕阅读器专用 (a11y) */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* prefers-reduced-motion: 用户开启了"减少动效"系统设置
+   - 关掉所有 transition / animation
+   - 保留 opacity 渐变（0.05s 极短，不引起不适） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.05ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* 数字 / 统计值 - tabular-nums 默认开启 */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* =====================================================
+   #P2-L1 移动端响应式：表格转卡片式
+   - 默认 768px 以下: el-table 隐藏表头，每行转卡片
+   - 每列的 label 通过 td.col-<prop>::before 显示
+   - 实际使用：GenericCrud 已加 class="responsive-cards"
+     列 prop 决定 col-name，CSS 把 className → 中文 label
+   ===================================================== */
+@media (max-width: 768px) {
+  .responsive-cards .el-table__header-wrapper { display: none; }
+  .responsive-cards .el-table__body-wrapper,
+  .responsive-cards .el-table__body { display: block; }
+  .responsive-cards .el-table__row {
+    display: block !important;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    background: var(--bg-card);
+    box-shadow: var(--shadow-xs);
+  }
+  .responsive-cards .el-table__row td.el-table__cell {
+    display: flex !important;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0 !important;
+    border-bottom: 1px dashed var(--border-light) !important;
+    white-space: normal !important;
+    text-align: right;
+  }
+  .responsive-cards .el-table__row td.el-table__cell:last-child { border-bottom: none !important; }
+  .responsive-cards .el-table__row td.el-table__cell > .cell {
+    flex: 1;
+    text-align: right;
+    width: auto;
+  }
+  /* # 列：标"序号" */
+  .responsive-cards .col-label-index::before,
+  .responsive-cards .el-table__row .col-index::before { content: '序号'; }
+  /* 各列：根据 class 名注入 label */
+  .responsive-cards .el-table__row .col-code::before           { content: '编码'; }
+  .responsive-cards .el-table__row .col-name::before           { content: '名称'; }
+  .responsive-cards .el-table__row .col-campuses::before       { content: '院区'; }
+  .responsive-cards .el-table__row .col-campus_code::before    { content: '院区编码'; }
+  .responsive-cards .el-table__row .col-campus_name::before    { content: '院区'; }
+  .responsive-cards .el-table__row .col-zone_code::before      { content: '诊区编码'; }
+  .responsive-cards .el-table__row .col-zone_name::before      { content: '诊区'; }
+  .responsive-cards .el-table__row .col-room_id::before        { content: '诊室编号'; }
+  .responsive-cards .el-table__row .col-room_name::before      { content: '诊室'; }
+  .responsive-cards .el-table__row .col-department::before     { content: '科室'; }
+  .responsive-cards .el-table__row .col-title::before          { content: '职称'; }
+  .responsive-cards .el-table__row .col-other_title::before    { content: '其他职称'; }
+  .responsive-cards .el-table__row .col-work_id::before        { content: '工号'; }
+  .responsive-cards .el-table__row .col-status::before         { content: '状态'; }
+  .responsive-cards .el-table__row .col-sort_order::before     { content: '排序'; }
+  .responsive-cards .el-table__row .col-period::before         { content: '时段'; }
+  .responsive-cards .el-table__row .col-start_time::before     { content: '开始'; }
+  .responsive-cards .el-table__row .col-end_time::before       { content: '结束'; }
+  .responsive-cards .el-table__row .col-day_of_week::before    { content: '周次'; }
+  .responsive-cards .el-table__row .col-clinic_type_code::before { content: '门诊类型'; }
+  .responsive-cards .el-table__row .col-clinic_type_name::before { content: '门诊类型'; }
+  .responsive-cards .el-table__row .col-time_slot_code::before { content: '时段编码'; }
+  .responsive-cards .el-table__row .col-doctor_id::before      { content: '医生 ID'; }
+  .responsive-cards .el-table__row .col-doctor_name::before    { content: '医生'; }
+  .responsive-cards .el-table__row .col-username::before       { content: '账号'; }
+  .responsive-cards .el-table__row .col-role::before           { content: '角色'; }
+  .responsive-cards .el-table__row .col-created_at::before     { content: '创建时间'; }
+  .responsive-cards .el-table__row .col-updated_at::before     { content: '更新时间'; }
+  .responsive-cards .el-table__row .col-remark::before         { content: '备注'; }
+  .responsive-cards .el-table__row .col-patient_limit::before  { content: '限号'; }
+  .responsive-cards .el-table__row .col-action::before,
+  .responsive-cards .el-table__row .col-operations::before     { content: '操作'; }
+
+  /* 默认 fallback：所有 cell 显示"字段" */
+  .responsive-cards .el-table__row td.el-table__cell::before {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 600;
+    flex-shrink: 0;
+    margin-right: 12px;
+    text-transform: none;
+    letter-spacing: 0.3px;
+  }
+  .responsive-cards .el-table__row td.el-table__cell:not([class*="col-"])::before { content: '字段'; }
+
+  /* 工具栏：在窄屏堆叠 */
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch !important;
+  }
+  .toolbar-left, .toolbar-right {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .toolbar .el-input { width: 100% !important; }
+}
+
+/* 触屏 + 小屏: 隐藏次要列 */
+@media (max-width: 1024px) {
+  .hide-on-tablet { display: none !important; }
+}
+@media (max-width: 640px) {
+  .hide-on-mobile { display: none !important; }
+}

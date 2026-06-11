@@ -1,17 +1,20 @@
 <template>
-  <generic-crud
-    endpoint="/doctors"
-    :columns="columns"
-    :form-fields="formFields"
-  />
+  <div class="view-wrap">
+    <generic-crud
+      endpoint="/doctors"
+      entity-name="医生"
+      :columns="columns"
+      :form-fields="formFields"
+    />
+  </div>
 </template>
 
 <script setup>
 import GenericCrud from '@/components/GenericCrud.vue'
 
+// #问题2：删除冗余 ID 列
 const columns = [
-  { prop: 'id', label: 'ID', minWidth: 60 },
-  { prop: 'name', label: '姓名', sortable: true },
+  { prop: 'name', label: '姓名', sortable: true, minWidth: 100 },
   { prop: 'work_id', label: '工号', minWidth: 100 },
   { prop: 'department', label: '科室', minWidth: 120, sortable: true },
   { prop: 'title', label: '职称', minWidth: 100 },
