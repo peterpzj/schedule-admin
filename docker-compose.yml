@@ -12,6 +12,12 @@ services:
       - ./data:/app/data        # SQLite 数据持久化
       - ./uploads:/app/uploads  # 上传文件持久化
       - ./logs:/app/logs        # 日志
+    # #P0-7 修复：直接 env_file 加载整个 .env（避免 shell 变量未注入导致 ${VAR:?} 报错）
+    #   - 之前 ${JWT_REFRESH_SECRET:?...} 在 server ssh 进来直接跑时，shell 没设该变量
+    #     → docker compose 直接报配置错误
+    #   - 改用 env_file 后，docker compose 自己读 .env，自动注入所有 KEY
+    env_file:
+      - .env
     environment:
       - NODE_ENV=production
       - PORT=3000
