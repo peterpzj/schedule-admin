@@ -26,9 +26,45 @@ const log = require('../lib/logger');
 
 const SYNC_THRESHOLD = 1000;  // 超过此行数走异步
 
-// 上传目录
-const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads';
+// #P1-9 修复：并发上限 — 同时跑 3 个大文件 import 会把 better-sqlite3 锁死/撑爆内存
+const MAX_CONCURRENT_IMPORTS = 3;
+let _runningImports = 0;
+function _tryStartJob(fn) {
+  if (_runningImports >= MAX_CONCURRENT_IMPORTS) {
+    setTimeout(() => _tryStartJob(fn), 200);
+    return;
+  }
+  _runningImports++;
+  fn().finally(() => { _runningImports--; });
+}
+
+// #Audit#29 修复：UPLOAD_DIR 相对 __dirname — node 启动 cwd 不同会写错地方
+//   之前：process.env.UPLOAD_DIR || './uploads' — docker/pm2 启动时 cwd 可能是 /, 写根目录就坏
+//   之后：默认 path.join(__dirname, '..', 'uploads')
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// 启动时清理 >1h 的孤儿上传（异常中断、route crash 时残留）
+function cleanupStaleUploads(maxAgeMs = 60 * 60 * 1000) {
+  try {
+    const now = Date.now();
+    let removed = 0;
+    for (const name of fs.readdirSync(UPLOAD_DIR)) {
+      const fp = path.join(UPLOAD_DIR, name);
+      try {
+        const st = fs.statSync(fp);
+        if (st.isFile() && (now - st.mtimeMs) > maxAgeMs) {
+          fs.unlinkSync(fp);
+          removed++;
+        }
+      } catch (_) {}
+    }
+    if (removed > 0) log.info('upload.cleanup', { removed, dir: UPLOAD_DIR });
+  } catch (e) {
+    log.warn('upload.cleanup.failed', { err: e.message });
+  }
+}
+cleanupStaleUploads();
 
 const upload = multer({
   dest: UPLOAD_DIR,
@@ -201,7 +237,9 @@ const FK_RULES = {
     { field: 'room_id',        refTable: 'rooms',      refField: 'room_id' },
     { field: 'clinic_type_code', refTable: 'clinic_types', refField: 'code' },
     { field: 'time_slot_code', refTable: 'time_slots', refField: 'code' },
-    { field: 'doctor_id',      refTable: 'doctors',    refField: 'id' }
+    { field: 'doctor_id',      refTable: 'doctors',    refField: 'id' },
+    // #Audit#4 修复：跨字段校验 — 写了 campus_name 时必须与 campuses.name 一致
+    { field: 'campus_name',    refTable: 'campuses',   refField: 'name',  crossField: true, depField: 'campus_code' }
   ]
 };
 
@@ -225,6 +263,9 @@ function preValidateFks(builtSheets) {
     time_slots:    new Set(db.prepare('SELECT code FROM time_slots').all().map(r => r.code)),
     doctors:       new Set(db.prepare('SELECT id FROM doctors').all().map(r => r.id))
   };
+  // #Audit#4：跨字段映射 campus_code → campuses.name
+  const _campusRows = db.prepare('SELECT code, name FROM campuses').all();
+  known._campusNameByCode = Object.fromEntries(_campusRows.map(r => [r.code, r.name]));
 
   // 2) 收集本批次将新增的 code（按表）
   //    注意：用本次导入的“已构建数据”而不是真实插入，估算本批次带来的新值
@@ -249,6 +290,21 @@ function preValidateFks(builtSheets) {
       for (const rule of rules) {
         const v = r[rule.field];
         if (v == null || v === '') continue; // 必填已经在 buildRows 阶段检查了
+
+        // #Audit#4 跨字段：campus_name 必须等于 campuses.name（按 depField=campus_code 拿对应行）
+        if (rule.crossField && rule.depField) {
+          const depVal = r[rule.depField];
+          const depNameMap = known._campusNameByCode;
+          if (depNameMap && depVal && depNameMap[depVal] && depNameMap[depVal] !== v) {
+            warnings.push({
+              sheet: sheetName, row: rowNum, field: rule.field, value: v,
+              refTable: rule.refTable,
+              msg: '跨字段不一致：' + rule.depField + '=' + depVal + ' 对应 ' + rule.refTable + '.name=' + depNameMap[depVal] + '，但本行写的是 '+ v
+            });
+            continue;
+          }
+        }
+
         const set = known[rule.refTable];
         if (!set || !set.has(v)) {
           warnings.push({
@@ -348,6 +404,8 @@ router.post('/import', requireAuth, upload.single('file'), asyncHandler(async (r
 
   // 超过阈值转异步
   if (totalRows > SYNC_THRESHOLD && !dryRun) {
+    // #P0-5 修复：早返回前清理临时文件，避免孤儿上传堆积
+    try { fs.unlinkSync(req.file.path); } catch (_) {}
     return res.status(202).json(ok({
       message: '文件超过 ' + SYNC_THRESHOLD + ' 行，请改用异步导入',
       jobId: null,
@@ -490,7 +548,7 @@ router.post('/import-async', requireAuth, upload.single('file'), asyncHandler(as
   }));
 
   // 后台执行
-  setImmediate(async () => {
+  _tryStartJob(async () => {
     job.status = 'running';
     const summary = {};
     const errors = [];
@@ -538,6 +596,11 @@ router.post('/import-async', requireAuth, upload.single('file'), asyncHandler(as
       jobs.completeJob(job, { mode, summary, errors: errors.slice(0, 50) });
       audit(job.user.id, job.user.username, dryRun ? 'import_async_dry_run' : 'import_async', 'excel', null, { mode, summary }, null);
     } catch (e) {
+      // #P2-38 修复：区分 cancelled vs failed — setProgress 抛的 cancelled 不应被记为失败
+      if (e && e.cancelled) {
+        jobs.completeJob(job, { mode, summary, errors: errors.slice(0, 50), cancelled: true });
+        return;
+      }
       jobs.failJob(job, e);
     } finally {
       try { fs.unlinkSync(req.file.path); } catch (_) {}
@@ -635,16 +698,27 @@ router.get('/export', requireAuth, asyncHandler(async (req, res) => {
     FROM schedules ORDER BY campus_code, day_of_week, period, room_id
   `);
 
-  // better-sqlite3 支持 iterate 流式读
-  const allRows = [];
-  for (const row of stmt.iterate()) {
-    allRows.push(row);
-    if (allRows.length >= BATCH_SIZE) {
-      log.debug('export.batch', { rows: allRows.length });
-    }
+  // #Audit#20 修复：导出按 5k/页分多个 sheet 写 — 避免 json_to_sheet(O(N²) 内存膨胀)
+  //   之前：先 iterate 攒到 allRows（10k 行已经 ~10MB JS 对象），再 json_to_sheet → O(N²) cell matrix 写一遍
+  //   之后：流式读 + 每 5k 行写一个 sheet（8-排班、8-排班-2、8-排班-3…），单 sheet 内存上限可控
+  const SHEET_MAX = 5000;
+  let buf = [];
+  let sheetIdx = 0;
+  let totalRows = 0;
+  function flushSheet() {
+    if (buf.length === 0) return;
+    const name = sheetIdx === 0 ? '8-排班' : '8-排班-' + (sheetIdx + 1);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(buf), name);
+    sheetIdx += 1;
+    buf = [];
   }
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(allRows), '8-排班');
-  log.info('export.completed', { schedules: allRows.length });
+  for (const row of stmt.iterate()) {
+    buf.push(row);
+    totalRows += 1;
+    if (buf.length >= SHEET_MAX) flushSheet();
+  }
+  flushSheet();
+  log.info('export.completed', { schedules: totalRows, sheets: sheetIdx });
 
   const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
   const filename = '排班数据备份_' + new Date().toISOString().slice(0, 10) + '.xlsx';

@@ -192,6 +192,29 @@ function asyncHandler(fn) {
   };
 }
 
+/**
+ * #Audit#25 修复：抽 runTx(label, fn) — 4 处 POST/PUT/copy 都重复
+ *   try { tx(...) } catch (e) { if (ERR[e.code]) throw biz(ERR[e.code], ...); throw e }
+ * 统一在 lib/errors.js 里
+ */
+function runTx(label, fn) {
+  try {
+    return fn()
+  } catch (e) {
+    if (e instanceof BizError) {
+      // P1-13: biz() 已构造 BizError,直接 re-throw 保留原 stack(栈点指向 fn() 内部)
+      log.warn('runTx.biz_error', { label, code: e.code, msg: e.message, stack: e.stack })
+      throw e
+    }
+    if (e && e.code && ERR[e.code]) {
+      log.warn('runTx.biz_error', { label, code: e.code, msg: e.message })
+      throw biz(ERR[e.code], e.message, e.details)
+    }
+    log.error('runTx.unhandled', { label }, e)
+    throw e
+  }
+}
+
 module.exports = {
   ERR,
   BizError,
@@ -199,5 +222,6 @@ module.exports = {
   ok,
   fail,
   errorMiddleware,
-  asyncHandler
+  asyncHandler,
+  runTx
 };

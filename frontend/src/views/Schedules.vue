@@ -16,6 +16,7 @@
     <!-- 过滤栏 -->
     <div class="panel-card">
       <div class="filter-bar">
+        <!-- #P1-9 修复：el-form 只包筛选控件，告警/状态指示挪到外面 -->
         <el-form :inline="true" :model="filter" class="filter-form">
           <el-form-item label="诊区">
             <el-select v-model="filter.zoneCode" placeholder="全部诊区" clearable filterable style="width: 160px" @change="onFilter">
@@ -38,7 +39,10 @@
           <el-form-item>
             <el-button :icon="Refresh" @click="resetFilter">重置</el-button>
           </el-form-item>
-                <el-alert
+        </el-form>
+
+        <!-- 告警/状态：编辑弹窗才用，目前仅占位（如果不需要可删） -->
+        <el-alert
           v-if="conflicts.length > 0"
           type="error"
           :closable="false"
@@ -58,9 +62,7 @@
           <span>可继续保存。</span>
           <el-button v-if="availableSlots.length > 0" link type="primary" size="small" @click="loadAvailableSlots">查看空闲时段</el-button>
         </el-alert>
-        <el-alert v-else-if="checkingConflict" type="info" :closable="false" show-icon style="margin-top: 12px" title="正在检测冲突...">
-        </el-alert>
-      </el-form>
+        <el-alert v-else-if="checkingConflict" type="info" :closable="false" show-icon style="margin-top: 12px" title="正在检测冲突..." />
 
         <div class="filter-stats">
           <span class="stat-pill">共 <b>{{ total }}</b> 条</span>
@@ -71,6 +73,7 @@
     </div>
 
     <!-- 排班列表（按周次分组） -->
+    <!-- #P2-21 修复：仅渲染有数据的 day 面板（之前 7 个全画，大量空表格） -->
     <div v-for="dow in visibleDays" :key="dow" class="panel-card">
       <div class="day-header">
         <span class="day-label">{{ WEEKDAYS[dow - 1] }}</span>
@@ -82,6 +85,7 @@
         :data="groupByDay[dow]"
         stripe
         :empty-text="loading ? '加载中...' : '本周次暂无排班'"
+        :row-class-name="onRowClass"
       >
         <el-table-column prop="doctor_name" label="医生" min-width="100">
           <template #default="{ row }">
@@ -156,12 +160,16 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import AppIcon from '@/components/AppIcon.vue'
 import api from '@/api'
 import { useDebouncedFn } from '@/composables/useDebouncedFn'
 import ScheduleFormDialog from '@/components/schedule/ScheduleFormDialog.vue'
+
+// #P1-14 修复：useRoute() 必须在 <script setup> 顶层调用，响应式订阅才能正常建立
+const route = useRoute()
 
 const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 
@@ -171,6 +179,8 @@ const loading = ref(false)
 const saving = ref(false)
 const dialogVisible = ref(false)
 const editing = ref({})
+// #P2-22 Timeline 跳转高亮
+const highlightId = ref(null)
 
 const campuses = ref([])
 const zones = ref([])
@@ -311,15 +321,36 @@ function onEdit(row) {
   dialogVisible.value = true
 }
 
+/**
+ * #P2-22 修复：行 className — Timeline 跳转带 highlight=id 过来时
+ *   给那一行加 is-highlighted 类（在 scoped CSS 里有动画）
+ *   - 命中：返回 'is-highlighted'
+ *   - 不命中：返回 ''
+ * element-plus 表格 row-class-name 是函数 (row, rowIndex) => string
+ */
+function onRowClass({ row }) {
+  if (highlightId.value && Number(row.id) === highlightId.value) return 'is-highlighted'
+  return ''
+}
+
 async function onDelete(row) {
-  await ElMessageBox.confirm(
-    `确认删除 ${row.doctor_name} 在 ${row.room_name}（${WEEKDAYS[(row.day_of_week || 1) - 1]} ${row.period}）的排班？`,
-    '删除确认', { type: 'warning', confirmButtonText: '确认删除' }
-  )
-  const res = await api.delete('/schedules/' + row.id)
-  if (res.success) {
-    ElMessage.success('已删除')
-    loadList()
+  try {
+    await ElMessageBox.confirm(
+      `确认删除 ${row.doctor_name} 在 ${row.room_name}（${WEEKDAYS[(row.day_of_week || 1) - 1]} ${row.period}）的排班？`,
+      '删除确认', { type: 'warning', confirmButtonText: '确认删除' }
+    )
+  } catch (_) { return }  // 用户取消
+  try {
+    const res = await api.delete('/schedules/' + row.id)
+    if (res.success) {
+      ElMessage.success('已删除')
+      loadList()
+    } else {
+      // #P1-14 修复：失败时明确告诉用户 — 之前静默失败，运营误以为"点了没反应"
+      ElMessage.error(res.error || '删除失败')
+    }
+  } catch (e) {
+    ElMessage.error('删除失败：' + (e?.message || '网络错误'))
   }
 }
 
@@ -507,13 +538,23 @@ async function onSave() {
       ElMessage.success('已保存')
       dialogVisible.value = false
       loadList()
+    } else {
+      // #P1-14 修复：保存失败明确告诉用户
+      ElMessage.error(res.error || '保存失败')
     }
+  } catch (e) {
+    ElMessage.error('保存失败：' + (e?.message || '网络错误'))
   } finally {
     saving.value = false
   }
 }
 
 onMounted(async () => {
+  // #P2-22 修复：Timeline 跳转带 highlight=id 过来，给行加 is-highlighted 类
+  //   之前：router.push('/schedules', { query: { highlight: b.ids[0] } }) — 跳是跳了，但 Schedules.vue 不识别
+  //   之后：route.query.highlight 写入 highlightId, el-table row-class-name 返回 is-highlighted
+  if (route.query.highlight) highlightId.value = Number(route.query.highlight)
+
   // #问题4-A 修复：使用 Promise.allSettled 防止任一 API 失败导致后续逻辑全挂
   //   之前用 Promise.all，任一 reject 会让 Promise.all reject，整个页面挂掉
   //   现在用 Promise.allSettled 让所有 API 完成后再继续，单个失败不影响其他
@@ -671,4 +712,16 @@ onMounted(async () => {
 }
 .empty-icon { font-size: 64px; margin-bottom: 12px; opacity: 0.5; }
 .empty-text { font-size: 15px; margin-bottom: 16px; }
+
+/* #P2-22 Timeline 跳转高亮 — 行级动画 + 边框强调 */
+:deep(.el-table__row.is-highlighted > td.el-table__cell) {
+  background: linear-gradient(90deg, rgba(3, 105, 161, 0.12) 0%, rgba(14, 165, 233, 0.04) 100%) !important;
+  box-shadow: inset 3px 0 0 var(--color-primary);
+  font-weight: 600;
+  animation: row-pulse 1.6s ease-in-out 2;
+}
+@keyframes row-pulse {
+  0%, 100% { background-color: rgba(3, 105, 161, 0.12); }
+  50%      { background-color: rgba(3, 105, 161, 0.22); }
+}
 </style>

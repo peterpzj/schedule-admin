@@ -21,6 +21,8 @@ api.interceptors.request.use((config) => {
   if (token) {
     config.headers.Authorization = 'Bearer ' + token
   }
+  // #Audit#17：记录请求开始时间用于 4xx/5xx 日志外发
+  config.metadata = { startedAt: Date.now() }
   return config
 })
 
@@ -50,14 +52,14 @@ const CODE_MESSAGE_FALLBACK = {
 
 const TOKEN_EXPIRED_CODES = new Set(['AUTH_TOKEN_MISSING', 'AUTH_TOKEN_INVALID', 'AUTH_TOKEN_EXPIRED'])
 
-// 响应拦截器：统一处理错误 + 智能解包列表响应
-//  - 标准 { success, data, ... }：原样返回
-//  - 列表 { success, data: { data: [...], total, page } }：自动解包为 { success, data: [...], total, page }
-//    这样旧的 res.data 取数组的写法无需改动
+// 响应拦截器：统一处理错误 + opt-in 列表解包
+//   #Audit#21 修复：去掉隐式"smart unwrap" — 之前凡是 body.data.data 数组就解包
+//     是隐式契约，后端一改字段就静默丢数据
+//   之后：仅当后端在 body 里显式 { __unwrapList: true } 时解包；老接口保持行为
 api.interceptors.response.use(
   (resp) => {
     const body = resp.data
-    if (body && body.success && body.data && typeof body.data === 'object' && Array.isArray(body.data.data)) {
+    if (body && body.__unwrapList && body.data && typeof body.data === 'object' && Array.isArray(body.data.data)) {
       // 列表响应：把内层 data 提到外层
       return {
         success: body.success,
@@ -75,19 +77,46 @@ api.interceptors.response.use(
     const data = err.response?.data
     const code = data?.code
     const serverMsg = data?.error
+    const status = err.response?.status
+    const url = err.config?.url || ''
+    const method = (err.config?.method || 'GET').toUpperCase()
+    const startedAt = err.config?.metadata?.startedAt || Date.now()
+    const ms = Date.now() - startedAt
 
-    if (err.response?.status === 401 || TOKEN_EXPIRED_CODES.has(code)) {
+    // #Audit#17 修复：4xx/5xx 自动外发客户端日志（best-effort，独立 navigator.sendBeacon 通道）
+    //   之前：控制台一行 — 现场崩溃没线索
+    //   之后：sendBeacon POST /api/client-log 静默送达，body 包含 method/url/status/ms/ua
+    if (status && status >= 400) {
+      try {
+        const payload = JSON.stringify({
+          level: status >= 500 ? 'error' : 'warn',
+          source: 'api',
+          method, url, status, code, ms,
+          ua: navigator.userAgent,
+          ts: new Date().toISOString()
+        })
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon('/api/client-log', new Blob([payload], { type: 'application/json' }))
+        }
+      } catch (_) {}
+    }
+
+    // #Audit#18 修复：调用方希望自己处理错误时，置 config.skipToast，拦截器只外发日志不弹 toast
+    const skipToast = err.config?.skipToast
+    if (status === 401 || TOKEN_EXPIRED_CODES.has(code)) {
       handleTokenExpired(err.config)
-    } else if (err.response?.status === 403 || code === 'AUTHZ_FORBIDDEN' || code === 'AUTHZ_ROLE_REQUIRED') {
-      // #22 角色守卫的兜底：前端用 v-if 隐藏的同时，被绕过时弹明确提示
-      ElMessage.error(CODE_MESSAGE_FALLBACK[code] || '无权限执行此操作')
-      // 不跳路由（可能是某按钮被点了，让用户自己回去）
+    } else if (status === 403 || code === 'AUTHZ_FORBIDDEN' || code === 'AUTHZ_ROLE_REQUIRED') {
+      if (!skipToast) ElMessage.error(CODE_MESSAGE_FALLBACK[code] || '无权限执行此操作')
+    } else if (status >= 500) {
+      // #Audit#10 修复：5xx 不暴露 serverMsg（可能含 /uploads/xxx.xlsx 路径、SQL 错误）
+      console.error('[api] 5xx', { method, url, status, serverMsg, code })
+      if (!skipToast) ElMessage.error('服务器开小差，请稍后重试')
     } else if (code && CODE_MESSAGE_FALLBACK[code]) {
-      ElMessage.error(CODE_MESSAGE_FALLBACK[code])
-    } else if (serverMsg) {
-      ElMessage.error(serverMsg)
+      if (!skipToast) ElMessage.error(CODE_MESSAGE_FALLBACK[code])
+    } else if (serverMsg && status >= 400) {
+      if (!skipToast) ElMessage.error(serverMsg)
     } else {
-      ElMessage.error('网络错误：' + (err.message || '未知'))
+      if (!skipToast) ElMessage.error('网络错误：' + (err.message || '未知'))
     }
     return Promise.reject(err)
   }
@@ -159,6 +188,33 @@ export async function apiDownload (url, params) {
     // 跳过响应拦截器的"列表自动解包"逻辑：直接拿原始 axios response
     transformResponse: undefined
   })
+  // #P1-8 修复：4xx/5xx 时 body 是 Blob 错误体（{code, error, message}），
+  //   通用响应拦截器看到的 err.response.data 是 Blob，data?.code 是 undefined，
+  //   只会弹通用"网络错误"。这里手动把 Blob 读成文本再 JSON.parse，
+  //   提取真正的错误码 / 错误消息抛出。
+  if (resp.status >= 400) {
+    let errMsg = `下载失败 HTTP ${resp.status}`
+    let code = 'DOWNLOAD_FAILED'
+    try {
+      const data = resp.data
+      const text = (data && typeof data.text === 'function') ? await data.text() : ''
+      if (text) {
+        try {
+          const j = JSON.parse(text)
+          if (j.error) errMsg = j.error
+          if (j.message) errMsg = j.message
+          if (j.code) code = j.code
+        } catch (_) {
+          // 文本不是 JSON，沿用 HTTP 状态消息
+        }
+      }
+    } catch (_) { /* 读取 Blob 失败，保持 errMsg */ }
+    try { ElMessage.error(errMsg) } catch (_) {}
+    const err = new Error(errMsg)
+    err.code = code
+    err.status = resp.status
+    throw err
+  }
   return resp.data
 }
 

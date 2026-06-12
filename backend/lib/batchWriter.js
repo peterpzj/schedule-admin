@@ -99,7 +99,8 @@ async function batchInsertReplaceTable(db, table, fields, rows, batchSize, onPro
       for (const r of chunk) for (const f of fields) flat.push(r[f] != null ? r[f] : null)
       const sql = 'INSERT INTO ' + table + ' (' + fields.join(',') + ') VALUES ' + placeholders
       try {
-        const info = db.prepare(sql).run.apply(db.prepare(sql), flat)
+        const stmt = db.prepare(sql)
+        const info = stmt.run(...flat)
         added += info.changes
       } catch (e) {
         // 整批失败，逐行
@@ -108,7 +109,7 @@ async function batchInsertReplaceTable(db, table, fields, rows, batchSize, onPro
             const ph = fields.map(function () { return '?'; }).join(',')
             const vals = fields.map(function (f) { return row[f] != null ? row[f] : null; })
             const stmt = db.prepare('INSERT INTO ' + table + ' (' + fields.join(',') + ') VALUES (' + ph + ')')
-            const info = stmt.run.apply(null, [stmt, ...vals])
+            const info = stmt.run(...vals)
             added += info.changes
           } catch (err) {
             errors.push('row failed: ' + JSON.stringify(row).slice(0, 200))
@@ -149,7 +150,8 @@ async function runBatched(db, table, fields, rows, batchSize, onProgress, strate
       .replace('{rows}', placeholders)
 
     try {
-      const info = db.prepare(sql).run.apply(db.prepare(sql), flat)
+      const stmt = db.prepare(sql)
+      const info = stmt.run(...flat)
       // better-sqlite3 的 changes()：IGNORE 模式下返回 实际写入行数
       // REPLACE 模式下返回 实际 affected 行数（含覆盖）
       // 但无法逐行区分，所以这里把全部视为 added
@@ -165,7 +167,7 @@ async function runBatched(db, table, fields, rows, batchSize, onProgress, strate
             .replace('{fields}', fields.join(','))
             .replace('{rows}', '(' + ph + ')')
           const stmt = db.prepare(singleSql)
-          const info = stmt.run.apply(null, [stmt, ...vals])
+          const info = stmt.run(...vals)
           if (info.changes > 0) added++
           else skipped++
         } catch (err) {

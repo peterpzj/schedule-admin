@@ -71,7 +71,9 @@ function setProgress(job, processed, total, inserted, failed) {
 }
 
 function completeJob(job, extra) {
-  job.status = job.cancelRequested ? 'cancelled' : 'completed';
+  // #P1-9 配套：支持 details.cancelled — 调用方可在 catch 中显式标记取消状态
+  const cancelled = job.cancelRequested || (extra && extra.cancelled === true);
+  job.status = cancelled ? 'cancelled' : 'completed';
   job.finishedAt = Date.now();
   Object.assign(job, extra || {});
   log.info('import.job.completed', {

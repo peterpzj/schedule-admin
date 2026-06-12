@@ -10,38 +10,11 @@ const { requireAuth } = require('../middleware/auth');
 const requireRole = require('../middleware/requireRole');
 const { audit } = require('../middleware/audit');
 const { scheduleWriteLimiter } = require('../middleware/rateLimit');
-const { ERR, biz, ok, fail, asyncHandler } = require('../lib/errors');
+const { ERR, biz, ok, fail, asyncHandler, runTx } = require('../lib/errors');
 const { ROLES, PERMISSIONS } = require('../lib/roles');
 const log = require('../lib/logger');
-
-/**
- * 字段映射：camelCase → snake_case
- * 前端（Vue/小程序）习惯用驼峰；POST/PUT 接受驼峰或下划线
- */
-const FIELD_ALIAS = {
-  doctorId: 'doctor_id', doctorName: 'doctor_name',
-  workId: 'work_id', department: 'department',
-  campusCode: 'campus_code', campusName: 'campus_name',
-  zoneCode: 'zone_code', zoneName: 'zone_name',
-  roomId: 'room_id', roomName: 'room_name',
-  clinicTypeCode: 'clinic_type_code', clinicTypeName: 'clinic_type_name',
-  timeSlotId: 'time_slot_id', timeSlotCode: 'time_slot_code',
-  period: 'period', startTime: 'start_time', endTime: 'end_time',
-  dayOfWeek: 'day_of_week', remark: 'remark', patientLimit: 'patient_limit'
-};
-
-/**
- * 把入参 body 规范成 snake_case 字段
- * 同时支持 camelCase 与 snake_case 输入
- */
-function normalizeBody(body) {
-  const out = {};
-  for (const [k, v] of Object.entries(body || {})) {
-    const key = FIELD_ALIAS[k] || k;
-    out[key] = v;
-  }
-  return out;
-}
+// #Audit#26 修复：字段映射统一到 lib/fieldMap.js
+const { CAMEL_TO_SNAKE: FIELD_ALIAS, normalizeBody, toApi } = require('../lib/fieldMap');
 
 /**
  * 校验 day_of_week 范围（1-7，ISO 周一到周日）
@@ -55,36 +28,13 @@ function validateDayOfWeek(d) {
   return n;
 }
 
-/**
- * 把数据库行（snake_case）映射为 API 行（camelCase）
- */
-function toApi(row) {
+// toApi 来自 lib/fieldMap.js — 这里只补 _id 字段别名（DB.id → API._id + campus._id 字段在 row.campus_name 时也用 campus）
+function toApiRow(row) {
   if (!row) return null;
-  return {
-    _id: row.id,
-    doctorId: row.doctor_id,
-    doctorName: row.doctor_name,
-    workId: row.work_id,
-    department: row.department,
-    campusCode: row.campus_code,
-    campus: row.campus_name,
-    zoneCode: row.zone_code,
-    zoneName: row.zone_name,
-    roomId: row.room_id,
-    roomName: row.room_name,
-    clinicTypeCode: row.clinic_type_code,
-    clinicTypeName: row.clinic_type_name,
-    timeSlotId: row.time_slot_id,
-    timeSlotCode: row.time_slot_code,
-    period: row.period,
-    startTime: row.start_time,
-    endTime: row.end_time,
-    dayOfWeek: row.day_of_week,
-    remark: row.remark,
-    patientLimit: row.patient_limit,
-    createTime: row.created_at,
-    updateTime: row.updated_at
-  };
+  const o = toApi(row);
+  o._id = row.id;
+  o.campus = row.campus_name;
+  return o;
 }
 
 /**
@@ -98,7 +48,18 @@ router.get('/', requireAuth, asyncHandler((req, res) => {
   if (req.query.campusCode) { where += ' AND campus_code = ?'; params.push(req.query.campusCode); }
   if (req.query.zoneCode) { where += ' AND zone_code = ?'; params.push(req.query.zoneCode); }
   if (req.query.clinicTypeCode) { where += ' AND clinic_type_code = ?'; params.push(req.query.clinicTypeCode); }
-  if (req.query.dayOfWeek) { where += ' AND day_of_week = ?'; params.push(Number(req.query.dayOfWeek)); }
+  // #Audit#1 修复：dayOfWeek 过滤做 0→7 归一化，与 copy-week / 后端存储对齐
+  //   之前：Number('0') === 0 → 查不到历史存为 0 的周日排班
+  //   之后：legacy 0 也视为周日（7），与数据库 copy-week 路径一致
+  if (req.query.dayOfWeek) {
+    const _dow = Number(req.query.dayOfWeek);
+    if (Number.isFinite(_dow)) {
+      const _dowNorm = (_dow === 0) ? 7 : _dow;
+      const _variants = _dowNorm === 7 ? [7, 0] : [_dowNorm];
+      where += ' AND day_of_week IN (' + _variants.map(() => '?').join(',') + ')';
+      params.push(..._variants);
+    }
+  }
   if (req.query.doctorId) { where += ' AND doctor_id = ?'; params.push(req.query.doctorId); }
   if (req.query.doctorName) { where += ' AND doctor_name LIKE ?'; params.push('%' + req.query.doctorName + '%'); }
   if (req.query.roomId) { where += ' AND room_id = ?'; params.push(req.query.roomId); }
@@ -112,11 +73,16 @@ router.get('/', requireAuth, asyncHandler((req, res) => {
   const rows = db.prepare(
     'SELECT * FROM schedules WHERE ' + where + ' ORDER BY day_of_week, period, room_id LIMIT ? OFFSET ?'
   ).all(...params, pageSize, offset);
-  res.json(ok({ data: rows.map(toApi), total, page, pageSize }));
+  res.json(ok({ data: rows.map(toApiRow), total, page, pageSize }));
 }));
 
 /**
  * 新增（含冲突检查）
+ * #P0-5 修复：把"冲突检查 + INSERT"放进 IMMEDIATE 事务，与 PUT 路由保持一致
+ *   之前：先 SELECT 查冲突、再 INSERT，两步不在事务里 — 两个并发 POST
+ *   (同诊室同周次同时段) 都会先看到"没冲突"，然后双双写入
+ *   之后：better-sqlite3 的 transaction() 同步代码默认原子执行，并发请求
+ *   只能一个成功，另一个自动失败
  */
 router.post('/', requireAuth, requireRole(PERMISSIONS.WRITE_BUSINESS), scheduleWriteLimiter, asyncHandler((req, res) => {
   const b = normalizeBody(req.body);
@@ -126,22 +92,39 @@ router.post('/', requireAuth, requireRole(PERMISSIONS.WRITE_BUSINESS), scheduleW
   }
   b.day_of_week = validateDayOfWeek(b.day_of_week);
   const db = getDb();
-  // 冲突检查（含 campusCode）
-  const conflict = db.prepare(
-    'SELECT id FROM schedules WHERE campus_code = ? AND room_id = ? AND day_of_week = ? AND time_slot_code = ?'
-  ).get(b.campus_code, b.room_id, b.day_of_week, b.time_slot_code);
-  if (conflict) throw biz(ERR.SCH_CONFLICT, '该诊室该周次该时段已有排班', { conflictId: conflict.id });
 
-  // 医生冲突
-  const docConflict = db.prepare(
-    'SELECT id FROM schedules WHERE doctor_id = ? AND day_of_week = ? AND time_slot_code = ?'
-  ).get(b.doctor_id, b.day_of_week, b.time_slot_code);
-  if (docConflict) throw biz(ERR.SCH_DOCTOR_BUSY, '该医生该周次该时段已安排其他诊室', { conflictId: docConflict.id });
+  const insertOne = db.transaction((body) => {
+    // 诊室冲突
+    const conflict = db.prepare(
+      'SELECT id FROM schedules WHERE campus_code = ? AND room_id = ? AND day_of_week = ? AND time_slot_code = ?'
+    ).get(body.campus_code, body.room_id, body.day_of_week, body.time_slot_code);
+    if (conflict) {
+      const err = new Error('该诊室该周次该时段已有排班');
+      err.code = 'SCH_CONFLICT';
+      err.httpStatus = 409;
+      err.details = { conflictId: conflict.id };
+      throw err;
+    }
+    // 医生冲突
+    const docConflict = db.prepare(
+      'SELECT id FROM schedules WHERE doctor_id = ? AND day_of_week = ? AND time_slot_code = ?'
+    ).get(body.doctor_id, body.day_of_week, body.time_slot_code);
+    if (docConflict) {
+      const err = new Error('该医生该周次该时段已安排其他诊室');
+      err.code = 'SCH_DOCTOR_BUSY';
+      err.httpStatus = 409;
+      err.details = { conflictId: docConflict.id };
+      throw err;
+    }
 
-  const fields = ['doctor_id', 'doctor_name', 'work_id', 'department', 'campus_code', 'campus_name', 'zone_code', 'zone_name', 'room_id', 'room_name', 'clinic_type_code', 'clinic_type_name', 'time_slot_id', 'time_slot_code', 'period', 'start_time', 'end_time', 'day_of_week', 'remark', 'patient_limit'];
-  const placeholders = fields.map(() => '?').join(',');
-  const values = fields.map(f => b[f] ?? null);
-  const info = db.prepare('INSERT INTO schedules (' + fields.join(',') + ') VALUES (' + placeholders + ')').run(...values);
+    const fields = ['doctor_id', 'doctor_name', 'work_id', 'department', 'campus_code', 'campus_name', 'zone_code', 'zone_name', 'room_id', 'room_name', 'clinic_type_code', 'clinic_type_name', 'time_slot_id', 'time_slot_code', 'period', 'start_time', 'end_time', 'day_of_week', 'remark', 'patient_limit'];
+    const placeholders = fields.map(() => '?').join(',');
+    const values = fields.map(f => body[f] ?? null);
+    return db.prepare('INSERT INTO schedules (' + fields.join(',') + ') VALUES (' + placeholders + ')').run(...values);
+  });
+
+  // #Audit#25 修复：用 runTx 统一 BizError 映射
+  const info = runTx('schedules.create', () => insertOne(b));
   audit(req.user.id, req.user.username, 'create', 'schedules', info.lastInsertRowid, b, req.ip);
   res.json(ok({ id: info.lastInsertRowid }));
 }));
@@ -202,15 +185,7 @@ router.put('/:id', requireAuth, requireRole(PERMISSIONS.WRITE_BUSINESS), schedul
     return db.prepare('UPDATE schedules SET ' + sets + ", updated_at = datetime('now', 'localtime') WHERE id = ?").run(...values, sid);
   });
 
-  let info;
-  try {
-    info = updateRow(id);
-  } catch (e) {
-    if (e.code && ERR[e.code]) {
-      throw biz(ERR[e.code], e.message, e.details);
-    }
-    throw e;
-  }
+  const info = runTx('schedules.update', () => updateRow(id));
   audit(req.user.id, req.user.username, 'update', 'schedules', req.params.id, b, req.ip);
   res.json(ok({ updated: info.changes }));
 }));
@@ -522,7 +497,10 @@ router.get('/recommend', requireAuth, asyncHandler((req, res) => {
   ).all(String(campusCode), dow);
   const occupiedSet = new Set(occupiedRows.map(r => r.room_id + '|' + r.time_slot_code));
 
-  // 生成所有 (room, slot) 组合，过滤已占 + 医生忙
+  // #Audit#2 修复：cartesian 收集到足够就停 — 100 诊室 × 16 时段 × 5 院区 ≈ 8k 条，先 sort 再截
+  //   之前：先 push 全部 8k+ 再 sort + slice — 内存峰值 + 排序浪费
+  //   之后：每生成一条先按 score 维护一个最小堆（top-K），room×slot 全部遍历完只保留 25 条
+  const TOP_K = 25; // 多留 5 条 buffer 给 sort 的 tiebreak
   const recs = [];
   for (const room of allRooms) {
     for (const slot of allSlots) {
@@ -533,18 +511,38 @@ router.get('/recommend', requireAuth, asyncHandler((req, res) => {
       if (doctorDept && room.department === doctorDept) score += 10;
       if (slot.period === '上午' || slot.period === '下午') score += 1;
       if (slot.period === '夜班') score -= 1;
-      recs.push({
-        roomId: room.room_id,
-        roomName: room.room_name,
-        zoneName: room.zone_name,
-        department: room.department,
-        slotCode: slot.code,
-        slotName: slot.name,
-        period: slot.period,
-        startTime: slot.start_time,
-        endTime: slot.end_time,
-        score
-      });
+      // 维护 top-K：未满直接 push+sort；已满则只在能挤掉末位时 push+sort+截断
+      // 每次 sort 再截断 → recs[TOP_K-1] 永远是当前最小，剪枝判断不再越界
+      if (recs.length < TOP_K) {
+        recs.push({
+          roomId: room.room_id,
+          roomName: room.room_name,
+          zoneName: room.zone_name,
+          department: room.department,
+          slotCode: slot.code,
+          slotName: slot.name,
+          period: slot.period,
+          startTime: slot.start_time,
+          endTime: slot.end_time,
+          score
+        });
+        recs.sort((a, b) => b.score - a.score);
+      } else if (score > recs[TOP_K - 1].score) {
+        recs.push({
+          roomId: room.room_id,
+          roomName: room.room_name,
+          zoneName: room.zone_name,
+          department: room.department,
+          slotCode: slot.code,
+          slotName: slot.name,
+          period: slot.period,
+          startTime: slot.start_time,
+          endTime: slot.end_time,
+          score
+        });
+        recs.sort((a, b) => b.score - a.score);
+        recs.length = TOP_K;
+      }
     }
   }
 
@@ -560,5 +558,143 @@ router.get('/:id', requireAuth, asyncHandler((req, res) => {
   if (!Number.isFinite(id)) return res.json({ success: false, code: 'SYS_NOT_FOUND' });
   const row = getDb().prepare('SELECT * FROM schedules WHERE id = ?').get(id);
   if (!row) throw biz(ERR.SCH_NOT_FOUND, '排班不存在');
-  res.json(ok(toApi(row)));
+  res.json(ok(toApiRow(row)));
 }));
+
+/**
+ * 批量上传（文件流 — P1-13 重型版）
+ * POST /api/schedules/batch-upload
+ * multipart/form-data, field='file', 支持 .xlsx / .xls / .csv
+ * 返回: { success, inserted, conflicts, errors, total }
+ *
+ * 解析规则（与 /batch 一致）：
+ *   - 第一行为表头(列名),支持驼峰或下划线
+ *   - 单次最多 500 条,超过 400
+ *   - 文件 > 5MB 拒绝(防止 OOM)
+ */
+const multer = require('multer');
+const XLSX = require('xlsx');
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    const ok = /\.(xlsx|xls|csv)$/i.test(file.originalname);
+    cb(ok ? null : new Error('仅支持 .xlsx / .xls / .csv 文件'), ok);
+  }
+});
+
+router.post('/batch-upload',
+  requireAuth,
+  requireRole(PERMISSIONS.WRITE_BUSINESS),
+  scheduleWriteLimiter,
+  (req, res, next) => {
+    // 把 multer 错误(fileFilter / fileSize) 映射成 400
+    upload.single('file')(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({ success: false, error: err.message });
+      }
+      next();
+    });
+  },
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: '请上传文件 (field: file)' });
+    }
+    let rows;
+    try {
+      const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      if (!sheet) throw new Error('空工作表');
+      rows = XLSX.utils.sheet_to_json(sheet, { defval: null, raw: false });
+    } catch (e) {
+      log.warn('batch-upload.parse.fail', { err: e.message });
+      return res.status(400).json({ success: false, error: '文件解析失败：' + e.message });
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ success: false, error: '文件无有效数据行' });
+    }
+    if (rows.length > 500) {
+      return res.status(400).json({ success: false, error: '单次最多 500 条，当前 ' + rows.length });
+    }
+    // 字段映射(camelCase → snake_case)
+    const toCamel = (s) => s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    const normalized = rows.map((r) => {
+      const o = {};
+      for (const [k, v] of Object.entries(r)) {
+        const key = FIELD_ALIAS[k] || FIELD_ALIAS[toCamel(k)] || k;
+        o[key] = v;
+      }
+      return o;
+    });
+    // 复用 /batch 路径的导入逻辑
+    const db = getDb();
+    let inserted = 0;
+    const conflicts = [];
+    const errors = [];
+    const insertOne = db.prepare(`
+      INSERT INTO schedules (
+        doctor_id, doctor_name, work_id, department,
+        campus_code, campus_name, zone_code, zone_name,
+        room_id, room_name,
+        clinic_type_code, clinic_type_name,
+        time_slot_id, time_slot_code, period, start_time, end_time,
+        day_of_week, remark, patient_limit
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const tx = db.transaction((list) => {
+      for (let i = 0; i < list.length; i++) {
+        const b = list[i];
+        const doctorId = b.doctor_id;
+        const roomId = b.room_id;
+        const dayOfWeek = b.day_of_week;
+        const timeSlotCode = b.time_slot_code;
+        const campusCode = b.campus_code;
+        if (!doctorId || !roomId || dayOfWeek == null || !timeSlotCode) {
+          errors.push({ row: i + 1, msg: '缺少必填 (doctorId/roomId/dayOfWeek/timeSlotCode)' });
+          continue;
+        }
+        let validDow;
+        try {
+          validDow = validateDayOfWeek(dayOfWeek);
+        } catch (e) {
+          errors.push({ row: i + 1, msg: e.message || 'dayOfWeek 不合法' });
+          continue;
+        }
+        const c = db.prepare(
+          'SELECT id FROM schedules WHERE campus_code = ? AND room_id = ? AND day_of_week = ? AND time_slot_code = ?'
+        ).get(campusCode, roomId, validDow, timeSlotCode);
+        if (c) {
+          conflicts.push({ row: i + 1, key: (roomId || '') + '/' + timeSlotCode });
+          continue;
+        }
+        insertOne.run(
+          doctorId, b.doctor_name || '', b.work_id || '', b.department || '',
+          campusCode, b.campus_name || '', b.zone_code || '', b.zone_name || '',
+          roomId, b.room_name || '',
+          b.clinic_type_code || '', b.clinic_type_name || '',
+          b.time_slot_id || null, timeSlotCode, b.period || '', b.start_time || '', b.end_time || '',
+          validDow, b.remark || '', b.patient_limit || null
+        );
+        inserted++;
+      }
+    });
+    try {
+      tx(normalized);
+    } catch (e) {
+      log.error('batch-upload.tx.fail', { err: e.message });
+      return res.status(500).json({ success: false, error: '导入事务失败：' + e.message });
+    }
+    audit(req.user.id, req.user.username, 'batch_upload', 'schedules', null, {
+      total: rows.length, inserted, conflicts: conflicts.length, errors: errors.length
+    }, req.ip);
+    log.info('batch-upload.done', { total: rows.length, inserted, conflicts: conflicts.length, errors: errors.length });
+    res.json({
+      success: true,
+      total: rows.length,
+      inserted,
+      conflicts,
+      errors
+    });
+  })
+);
