@@ -41,6 +41,11 @@ function audit(userId, username, action, entity, entityId, details, ip) {
     const detailsJson = JSON.stringify(details || {})
 
     // #P0-4：在事务里取 prev_hash + 插入，保证链原子性
+    // #B17：使用 .immediate() 强制 BEGIN IMMEDIATE —— 事务开始立即拿写锁，
+    //       防止两个并发请求读到相同的 prev_hash 导致链断。
+    //       better-sqlite3 默认事务是 deferred（首次读才升级为读锁，写时才升级为写锁），
+    //       多个事务可能在 SELECT prev_hash 阶段同时拿读锁，然后再竞争写锁 →
+    //       两个事务读到同一个 prev_hash 串行提交后链就断了。
     const tx = db.transaction(() => {
       // 1) 取最后一条的 curr_hash 作为本条的 prev_hash
       const last = db.prepare('SELECT curr_hash FROM audit_logs WHERE curr_hash != \'\' ORDER BY id DESC LIMIT 1').get()
@@ -71,7 +76,9 @@ function audit(userId, username, action, entity, entityId, details, ip) {
       return { id: info.lastInsertRowid, prevHash, currHash }
     })
 
-    const result = tx()
+    // .immediate() 让 better-sqlite3 在事务开始时立即请求 RESERVED（写）锁，
+    // 串行化所有并发 audit() 调用，避免它们读到同一个 prev_hash。
+    const result = tx.immediate()
     log.info('audit', {
       id: result.id,
       userId, username, action, entity,

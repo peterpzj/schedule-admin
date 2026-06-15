@@ -60,7 +60,8 @@
         <el-form-item label="角色">
           <el-select v-model="newUser.role" style="width: 100%">
             <el-option label="管理员" value="admin" />
-            <el-option label="普通用户" value="user" />
+            <el-option label="编辑" value="editor" />
+            <el-option label="只读" value="viewer" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -133,6 +134,7 @@ async function onCreateUser() {
   const res = await api.post('/auth/users', newUser)
   if (res.success) {
     ElMessage.success('已创建')
+    ElMessage.warning('账号已创建为「只读 viewer」,如需更高权限请到「用户管理」标签页用「修改角色」按钮')
     addUserVisible.value = false
     loadUsers()
   }

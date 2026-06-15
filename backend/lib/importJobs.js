@@ -12,6 +12,13 @@
 const { randomUUID } = require('crypto');
 const log = require('./logger');
 
+// #B24 修复占位：importJobs 是内存 Map,多进程/PM2/重启任务丢失
+//   完整持久化需建表 + 重构 createJob/getJob/listJobs/cancelJob,暂保持 memory 但加环境变量提示
+const STORE_BACKEND = (process.env.STORE_BACKEND || 'memory').toLowerCase();
+if (STORE_BACKEND === 'memory' && process.env.NODE_ENV === 'production') {
+  log.warn('importJobs.using.memory', { hint: '生产环境推荐实现 importJobs 持久化,当前多实例任务不共享' });
+}
+
 const JOBS = new Map(); // id -> { id, status, total, processed, inserted, errors, warnings, startedAt, finishedAt, file, cancelRequested }
 
 function createJob(meta) {

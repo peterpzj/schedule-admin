@@ -15,7 +15,7 @@
  *   2. admin API：/api/auditLogs/verify（admin 才能调）
  *   3. 健康检查：在 /api/health 里增量报 hash 链状态
  */
-const { verifyChain, GENESIS_HASH } = require('../middleware/audit')
+const { verifyChain, GENESIS_HASH, computeHash } = require('../middleware/audit')
 const { getDb } = require('../db')
 
 /**
@@ -72,6 +72,94 @@ function verifyWithStats() {
 }
 
 /**
+ * 增量校验：只校验 id > lastId 的行，避免全表 O(N) 扫描
+ *   - lastId 默认 0 → 等价于 verifyChain()（全量）
+ *   - lastId > 0 时：先用 lastId 那一行的 curr_hash 作为起点 prevHash，
+ *     再只查 id > lastId 的行做链式校验
+ *   - 返回 { ok, total, brokenAt, expected, got, sinceId, lastCheckedId }
+ *
+ * 用法：
+ *   - 健康检查：每次拿上次跑过的 lastId 做增量，几万行只需校验几十/几百行新行
+ *   - 上一次 full verify 出 brokenAt 时，可以从 brokenAt - 1 做增量定位增量损坏位置
+ *
+ * 注意事项：
+ *   - lastId 必须指向一条 curr_hash != '' 的行，否则起点 prev_hash 拿不到
+ *   - 调用方负责保证 lastId 之前那段历史已经被校验过（否则增量 OK 不代表全链 OK）
+ */
+function verifyChainSince(lastId = 0) {
+  const db = getDb()
+  let prevHash = GENESIS_HASH
+  let sinceId = 0
+
+  if (lastId > 0) {
+    // 取 lastId 那一行的 curr_hash 作为本次校验的 prev_hash 起点
+    const prev = db.prepare(
+      'SELECT curr_hash FROM audit_logs WHERE id = ? AND curr_hash != \'\''
+    ).get(lastId)
+    if (!prev) {
+      return {
+        ok: false,
+        total: 0,
+        brokenAt: null,
+        expected: null,
+        got: null,
+        sinceId: lastId,
+        lastCheckedId: null,
+        error: `lastId=${lastId} not found or has empty curr_hash`
+      }
+    }
+    prevHash = prev.curr_hash
+    sinceId = lastId
+  }
+
+  const rows = db.prepare(
+    'SELECT * FROM audit_logs WHERE curr_hash != \'\' AND id > ? ORDER BY id ASC'
+  ).all(sinceId)
+
+  let lastCheckedId = null
+  for (const r of rows) {
+    if (r.prev_hash !== prevHash) {
+      return {
+        ok: false,
+        brokenAt: r.id,
+        expected: prevHash,
+        got: r.prev_hash,
+        sinceId,
+        lastCheckedId: lastCheckedId
+      }
+    }
+    const expect = computeHash(prevHash, {
+      userId: r.user_id,
+      action: r.action,
+      entity: r.entity,
+      entityId: r.entity_id,
+      details: r.details,
+      ip: r.ip,
+      createdAt: r.created_at
+    })
+    if (expect !== r.curr_hash) {
+      return {
+        ok: false,
+        brokenAt: r.id,
+        expected: expect,
+        got: r.curr_hash,
+        sinceId,
+        lastCheckedId: lastCheckedId
+      }
+    }
+    prevHash = r.curr_hash
+    lastCheckedId = r.id
+  }
+
+  return {
+    ok: true,
+    total: rows.length,
+    sinceId,
+    lastCheckedId: lastCheckedId
+  }
+}
+
+/**
  * 把 verifyWithStats() 输出格式化成可读文本
  *   - human=true: 给人看
  *   - human=false: 给日志/监控
@@ -105,6 +193,7 @@ function renderReport(stats, opts = {}) {
 module.exports = {
   verifyWithStats,
   renderReport,
+  verifyChainSince,
   // 重导出，保持向后兼容
   verifyChain,
   GENESIS_HASH

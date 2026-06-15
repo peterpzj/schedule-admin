@@ -97,11 +97,13 @@ function biz(errDef, customMessage, details) {
 /**
  * 统一响应：成功
  */
-function ok(data, extra) {
-  const r = { success: true };
-  if (data !== undefined) r.data = data;
-  if (extra) Object.assign(r, extra);
-  return r;
+function ok(data, extra = {}) {
+  // #B1 修复：列表响应（带 data 数组 + total）自动打 __unwrapList 标记
+  //   前端 api/index.js 拦截器 opt-in 解包,免去每个端点手写
+  if (data && typeof data === 'object' && Array.isArray(data.data) && 'total' in data) {
+    extra.__unwrapList = true
+  }
+  return { success: true, ...(data !== undefined ? { data } : {}), ...extra }
 }
 
 /**

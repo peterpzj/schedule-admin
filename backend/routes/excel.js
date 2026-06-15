@@ -152,6 +152,10 @@ const SHEET_CONFIG = {
 /**
  * 内部：把上传文件解析成 sheet 列表
  */
+// #B25 修复：sync path 用 memory buffer 替代 sync I/O
+//   之前：parseWorkbook(filePath) → XLSX.readFile 同步读盘，阻塞主线程
+//   之后：sync 路径要求 multer.memoryStorage，XLSX.read(buffer) 同步解析(纯 CPU 工作)
+// TODO B25: switch multer to memoryStorage in excel.js + 调整两个 route 把 req.file.buffer 传给 parseWorkbook
 function parseWorkbook(filePath) {
   try {
     return XLSX.readFile(filePath);
@@ -174,6 +178,7 @@ function buildRowsForSheet(ws, config) {
     const v = r['姓名'] || r['诊室编号'] || r['医生姓名'] || r['名称'] || r['工号'];
     if (!v) continue;
     if (typeof v === 'string' && v.includes('示例')) continue;
+    // TODO B28: 改 isExample 结构化标记 — 模板生成时给示例行打 __isExample: true，导入端按字段判断而非字符串匹配
     validRows.push(r);
     rowIndexMap.push(i + 2); // Excel 行号：1=表头，2=第一行数据
   }
@@ -249,6 +254,8 @@ const FK_RULES = {
  *   - 流程：先收集本批次所有新增 code（不写入 DB），再校验每行 FK
  *   - 不抛错，只返回 warnings
  */
+// TODO B27: crossField 配置化 — 把跨字段规则（campus_code→campuses.name 等）抽成 FK_RULES 顶层 schema 配置，
+//   而不是每个 rule 上挂 crossField/depField 字段；当前 schema 跨字段能力弱（只能 1 层依赖）
 function preValidateFks(builtSheets) {
   const warnings = [];
 
@@ -767,3 +774,4 @@ router.get('/template', requireAuth, (req, res) => {
 });
 
 module.exports = router;
+module.exports.cleanupStaleUploads = cleanupStaleUploads;

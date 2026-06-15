@@ -292,6 +292,11 @@ function onAdd() {
 // 这里统一做 camelCase → snake_case 转换，保证弹窗回显与新增逻辑一致。
 function rowToEditing(row) {
   if (!row) return {}
+  // #B3 修复：Number(0) || 1 会把合法的 dow=0 静默改成 1。
+  //   显式做范围归一化：1..7 保留原值，0 归 7（日历里 0=周日），其他 NaN/Infinity/缺省 回退 1。
+  const rawDow = row.day_of_week ?? row.dayOfWeek
+  const n = Number(rawDow)
+  const normalizedDow = Number.isFinite(n) && n >= 1 && n <= 7 ? n : (n === 0 ? 7 : 1)
   return {
     id: row._id || row.id,
     doctor_id: row.doctor_id ?? row.doctorId,
@@ -310,13 +315,47 @@ function rowToEditing(row) {
     period: row.period,
     start_time: row.start_time ?? row.startTime,
     end_time: row.end_time ?? row.endTime,
-    day_of_week: Number(row.day_of_week ?? row.dayOfWeek) || 1,
+    day_of_week: normalizedDow,
     patient_limit: row.patient_limit ?? row.patientLimit,
     remark: row.remark
   }
 }
 
-function onEdit(row) {
+// #B20 修复：metadata 加载 promise 句柄，确保 onEdit 触发时字典已就绪
+let _metaLoadPromise = null
+// 已加载完成的元数据字典（用于 onSave 中按需补全时直接命中）
+const metaLoaded = ref(false)
+
+async function loadAllMeta() {
+  // #问题4-A 修复：使用 Promise.allSettled 防止任一 API 失败导致后续逻辑全挂
+  //   之前用 Promise.all，任一 reject 会让 Promise.all reject，整个页面挂掉
+  //   现在用 Promise.allSettled 让所有 API 完成后再继续，单个失败不影响其他
+  const results = await Promise.allSettled([
+    api.get('/campuses'),
+    api.get('/zones'),
+    api.get('/rooms'),
+    api.get('/timeSlots'),
+    api.get('/clinicTypes'),
+    api.get('/doctors')
+  ])
+  const [campusesRes, zonesRes, roomsRes, timeSlotsRes, clinicTypesRes, doctorsRes] = results
+  if (campusesRes.status === 'fulfilled' && campusesRes.value.success) campuses.value = campusesRes.value.data
+  if (zonesRes.status === 'fulfilled' && zonesRes.value.success) zones.value = zonesRes.value.data
+  if (roomsRes.status === 'fulfilled' && roomsRes.value.success) rooms.value = roomsRes.value.data
+  if (timeSlotsRes.status === 'fulfilled' && timeSlotsRes.value.success) timeSlots.value = timeSlotsRes.value.data
+  if (clinicTypesRes.status === 'fulfilled' && clinicTypesRes.value.success) clinicTypes.value = clinicTypesRes.value.data
+  if (doctorsRes.status === 'fulfilled' && doctorsRes.value.success) doctors.value = doctorsRes.value.data
+  metaLoaded.value = true
+}
+
+async function onEdit(row) {
+  // #B20 修复：编辑已有排班前确保 campus/zone/room/clinicType 等 metadata 已加载，
+  //   否则提交时 onSave 里 `campuses.value.find(...)` 找不到、name 补全全空，
+  //   后端保存时丢掉这些字段。
+  if (!_metaLoadPromise) _metaLoadPromise = loadAllMeta()
+  if (!metaLoaded.value) {
+    await _metaLoadPromise
+  }
   editing.value = rowToEditing(row)
   dialogVisible.value = true
 }
@@ -555,24 +594,10 @@ onMounted(async () => {
   //   之后：route.query.highlight 写入 highlightId, el-table row-class-name 返回 is-highlighted
   if (route.query.highlight) highlightId.value = Number(route.query.highlight)
 
-  // #问题4-A 修复：使用 Promise.allSettled 防止任一 API 失败导致后续逻辑全挂
-  //   之前用 Promise.all，任一 reject 会让 Promise.all reject，整个页面挂掉
-  //   现在用 Promise.allSettled 让所有 API 完成后再继续，单个失败不影响其他
-  const results = await Promise.allSettled([
-    api.get('/campuses'),
-    api.get('/zones'),
-    api.get('/rooms'),
-    api.get('/timeSlots'),
-    api.get('/clinicTypes'),
-    api.get('/doctors')
-  ])
-  const [campusesRes, zonesRes, roomsRes, timeSlotsRes, clinicTypesRes, doctorsRes] = results
-  if (campusesRes.status === 'fulfilled' && campusesRes.value.success) campuses.value = campusesRes.value.data
-  if (zonesRes.status === 'fulfilled' && zonesRes.value.success) zones.value = zonesRes.value.data
-  if (roomsRes.status === 'fulfilled' && roomsRes.value.success) rooms.value = roomsRes.value.data
-  if (timeSlotsRes.status === 'fulfilled' && timeSlotsRes.value.success) timeSlots.value = timeSlotsRes.value.data
-  if (clinicTypesRes.status === 'fulfilled' && clinicTypesRes.value.success) clinicTypes.value = clinicTypesRes.value.data
-  if (doctorsRes.status === 'fulfilled' && doctorsRes.value.success) doctors.value = doctorsRes.value.data
+  // #B20：复用 onEdit 的 metadata 加载句柄，避免重复 fetch。
+  // 首次进入时启动加载，onMounted 等待完成。
+  if (!_metaLoadPromise) _metaLoadPromise = loadAllMeta()
+  await _metaLoadPromise
   if (campuses.value.length > 0) filter.value.campusCode = campuses.value[0].code
   loadList()
 })

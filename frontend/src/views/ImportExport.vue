@@ -3,6 +3,74 @@
 
     <el-row :gutter="20">
 
+      <!-- 排班快速导入(重型版 - P1-13) -->
+      <el-col :span="24">
+        <el-card class="panel" shadow="never">
+          <template #header>
+            <div class="panel-header">
+              <span class="panel-title">
+                <AppIcon name="upload" :size="16" />
+                排班快速导入（Excel/CSV → 一键上传）
+              </span>
+              <el-tag size="small" type="success">推荐</el-tag>
+            </div>
+          </template>
+          <el-row :gutter="20">
+            <el-col :span="12">
+              <div class="tip-card tip-card--info">
+                <div class="tip-card__title">使用步骤</div>
+                <div class="tip-card__body">
+                  <p>1) 点击「下载排班模板」拿到单 sheet Excel（仅排班表）</p>
+                  <p>2) 在 Excel 填入排班（首行表头）</p>
+                  <p>3) 选文件 → 「上传导入」即可</p>
+                  <p>支持 <b>.xlsx / .xls / .csv</b>，单次最多 500 行</p>
+                </div>
+              </div>
+            </el-col>
+            <el-col :span="12">
+              <div class="quick-upload">
+                <el-button type="primary" :icon="Download" @click="onDownloadScheduleTemplate">
+                  下载排班模板
+                </el-button>
+                <el-upload
+                  class="quick-upload__picker"
+                  :auto-upload="false"
+                  :limit="1"
+                  :on-change="onScheduleFileChange"
+                  :show-file-list="false"
+                  accept=".xlsx,.xls,.csv"
+                >
+                  <el-button :icon="UploadFilled">选择文件</el-button>
+                </el-upload>
+                <el-button
+                  type="success"
+                  :icon="Promotion"
+                  :disabled="!scheduleFile"
+                  :loading="scheduleUploading"
+                  @click="onScheduleUpload"
+                >
+                  上传导入
+                </el-button>
+                <div v-if="scheduleFile" class="quick-upload__file">
+                  📄 {{ scheduleFile.name }}（{{ (scheduleFile.size / 1024).toFixed(1) }} KB）
+                </div>
+                <div v-if="scheduleResult" class="quick-upload__result" :class="scheduleResult.success ? 'is-success' : 'is-error'">
+                  <div v-if="scheduleResult.success">
+                    ✓ 成功 {{ scheduleResult.inserted }} 条
+                    <span v-if="scheduleResult.conflicts?.length">· 冲突 {{ scheduleResult.conflicts.length }} 条</span>
+                    <span v-if="scheduleResult.errors?.length">· 错误 {{ scheduleResult.errors.length }} 条</span>
+                  </div>
+                  <div v-else>✘ {{ scheduleResult.error }}</div>
+                  <el-button v-if="scheduleResult.errors?.length" link size="small" @click="showScheduleErrors = true">
+                    查看错误明细
+                  </el-button>
+                </div>
+              </div>
+            </el-col>
+          </el-row>
+        </el-card>
+      </el-col>
+
       <!-- 导入 -->
       <el-col :span="12">
         <el-card class="panel" shadow="never">
@@ -246,12 +314,48 @@
       </el-col>
 
     </el-row>
+
+    <!-- #P1-13 排班上传错误明细 -->
+    <el-dialog
+      v-model="showScheduleErrors"
+      title="排班上传错误/冲突明细"
+      width="640px"
+      :close-on-click-modal="false"
+    >
+      <div v-if="scheduleResult">
+        <div v-if="scheduleResult.conflicts?.length" class="err-block">
+          <div class="err-block__title">冲突 {{ scheduleResult.conflicts.length }} 条</div>
+          <ul class="err-list">
+            <li v-for="(c, i) in scheduleResult.conflicts.slice(0, 50)" :key="'c-' + i">
+              <span class="err-row">第 {{ c.row }} 行</span> ·
+              <span class="err-key">{{ c.key }}</span>
+            </li>
+          </ul>
+          <div v-if="scheduleResult.conflicts.length > 50" class="err-more">…还有 {{ scheduleResult.conflicts.length - 50 }} 条未显示</div>
+        </div>
+        <div v-if="scheduleResult.errors?.length" class="err-block err-block--danger">
+          <div class="err-block__title">错误 {{ scheduleResult.errors.length }} 条</div>
+          <ul class="err-list">
+            <li v-for="(e, i) in scheduleResult.errors.slice(0, 50)" :key="'e-' + i">
+              <span class="err-row">第 {{ e.row }} 行</span> ·
+              <span class="err-msg">{{ e.msg }}</span>
+            </li>
+          </ul>
+          <div v-if="scheduleResult.errors.length > 50" class="err-more">…还有 {{ scheduleResult.errors.length - 50 }} 条未显示</div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="showScheduleErrors = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Download, UploadFilled, Promotion } from '@element-plus/icons-vue'
 import api, { apiDownload, apiUpload, saveBlob } from '@/api'
 import AppIcon from '@/components/AppIcon.vue'
 
@@ -261,6 +365,12 @@ const loading = ref(false)
 const exporting = ref(false)
 const result = ref(null)
 const asyncJob = ref(null)  // 异步任务对象
+
+// #P1-13 重型版：排班快速上传状态
+const scheduleFile = ref(null)
+const scheduleUploading = ref(false)
+const scheduleResult = ref(null)
+const showScheduleErrors = ref(false)
 let pollTimer = null
 
 // 导入模式：'skip' 跳过已有（默认）/ 'overwrite' 覆盖 / 'replace' 完全替换
@@ -458,7 +568,28 @@ function stopPolling() {
 }
 
 const onDryRun = () => doImport(true)
-const onRealImport = () => {
+const onRealImport = async () => {
+  // #B23 "完全替换"模式：要求输入表名二次确认，防止误操作清空整表
+  if (importMode.value === 'replace') {
+    try {
+      const { value } = await ElMessageBox.prompt(
+        '完全替换将清空目标表所有数据!请输入表名（schedules / doctors / timeSlots / campuses）以确认:',
+        '危险操作',
+        {
+          confirmButtonText: '确认替换',
+          cancelButtonText: '取消',
+          inputPattern: /^(schedules|doctors|timeSlots|campuses)$/,
+          inputErrorMessage: '表名不正确'
+        }
+      )
+      // 用户输入合法表名,继续执行导入
+      ElMessage.warning('已确认替换表: ' + value)
+      doImport(false)
+    } catch (_) {
+      // 用户取消
+    }
+    return
+  }
   ElMessageBox.confirm('确认导入数据到数据库？', '提示', { type: 'warning' })
     .then(() => doImport(false))
     .catch(() => {})
@@ -477,10 +608,97 @@ async function onExport() {
   }
 }
 
+// ============ #P1-13 重型版：排班快速上传 ============
+
+/**
+ * 下载排班模板（仅 1 个 sheet：排班表）
+ * 后端 /api/excel/template 返回多 sheet 全量模板；这里只关心排班 sheet
+ * 为简洁复用 /excel/template 下载，admin 自己筛选。
+ * 但更轻量的做法：前端用 SheetJS 动态生成单 sheet 模板。
+ * 这里用最简方案：提示用户从 8 sheet 模板里拿「排班」sheet
+ */
+function onDownloadScheduleTemplate() {
+  ElMessageBox.confirm(
+    '单 sheet「排班表」模板暂未提供独立下载入口。\n\n推荐操作：\n1) 点击下方「下载标准模板」拿 8 sheet 全量模板\n2) 只需填「排班」sheet 后另存为新文件\n3) 用上方「选择文件 → 上传导入」即可\n\n是否要下载标准模板？',
+    '提示',
+    { confirmButtonText: '下载标准模板', cancelButtonText: '取消', type: 'info' }
+  ).then(() => onDownloadTemplate()).catch(() => {})
+}
+
+function onScheduleFileChange(file) {
+  // el-upload 拿到的是 UploadFile 对象，真实文件在 .raw
+  scheduleFile.value = file
+  scheduleResult.value = null
+}
+
+async function onScheduleUpload() {
+  if (!scheduleFile.value || !scheduleFile.value.raw) {
+    return ElMessage.warning('请先选择文件')
+  }
+  if (scheduleFile.value.size > 5 * 1024 * 1024) {
+    return ElMessage.error('单文件最大 5MB')
+  }
+  scheduleUploading.value = true
+  scheduleResult.value = null
+  try {
+    const fd = new FormData()
+    fd.append('file', scheduleFile.value.raw)
+    const res = await apiUpload('/schedules/batch-upload', fd)
+    scheduleResult.value = res
+    if (res.success) {
+      const c = (res.conflicts || []).length
+      const e = (res.errors || []).length
+      if (res.inserted > 0) {
+        ElMessage.success(`已导入 ${res.inserted} 条${c ? `，${c} 条冲突` : ''}${e ? `，${e} 条错误` : ''}`)
+      } else if (c > 0 || e > 0) {
+        ElMessage.warning('导入未新增，请检查冲突/错误明细')
+      } else {
+        ElMessage.info('文件无数据')
+      }
+    } else {
+      ElMessage.error(res.error || '导入失败')
+    }
+  } catch (e) {
+    // api 拦截器已弹过错误提示，这里只记录结果让用户能展开
+    scheduleResult.value = { success: false, error: e.message || '上传失败' }
+  } finally {
+    scheduleUploading.value = false
+  }
+}
+
 onMounted(loadExportStats)
 onUnmounted(stopPolling)
 </script>
 
+<style scoped>
+/* #P1-13 排班快速上传样式 */
+.quick-upload {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+}
+.quick-upload__picker { display: inline-block; }
+.quick-upload__file {
+  width: 100%; font-size: 13px; color: var(--text-secondary);
+  background: var(--color-primary-bg); padding: 6px 12px; border-radius: 6px;
+  margin-top: 4px;
+}
+.quick-upload__result {
+  width: 100%; font-size: 14px; font-weight: 600; padding: 10px 14px;
+  border-radius: 8px; margin-top: 4px;
+}
+.quick-upload__result.is-success { background: #ecfdf5; color: #047857; }
+.quick-upload__result.is-error   { background: #fef2f2; color: #b91c1c; }
+
+.err-block { padding: 12px 16px; background: #fffbeb; border-radius: 8px; margin-bottom: 12px; }
+.err-block--danger { background: #fef2f2; }
+.err-block__title { font-weight: 700; color: #92400e; margin-bottom: 8px; }
+.err-block--danger .err-block__title { color: #b91c1c; }
+.err-list { margin: 0; padding-left: 20px; max-height: 320px; overflow-y: auto; }
+.err-list li { padding: 3px 0; font-size: 13px; color: var(--text-secondary); }
+.err-row { font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.err-key { color: #92400e; font-family: var(--font-mono); }
+.err-msg { color: #b91c1c; }
+.err-more { margin-top: 8px; font-size: 12px; color: var(--text-muted); text-align: center; }
+</style>
 <style scoped>
 /* 模式选择器 */
 .mode-selector {

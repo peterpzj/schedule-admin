@@ -25,6 +25,7 @@ const timeSlotRoutes = require('./routes/timeSlots');
 const doctorRoutes = require('./routes/doctors');
 const scheduleRoutes = require('./routes/schedules');
 const excelRoutes = require('./routes/excel');
+const { cleanupStaleUploads } = excelRoutes;
 const { requireAuth } = require('./middleware/auth');
 const { isSecretValid, resolveSecret } = require('./middleware/auth');
 const { loginLimiter, createUserLimiter, globalLimiter, scheduleWriteLimiter, excelLimiter } = require('./middleware/rateLimit');
@@ -127,6 +128,10 @@ app.get('/api/statistics', requireAuth, asyncHandler(async (req, res) => {
   let where = '1=1';
   if (campus) { where += ' AND campus_code = ?'; params.push(campus); }
 
+  // #Audit#15 修复：8 个 SELECT 放进事务，保证一个请求内数据快照一致
+  //   之前：跨 SELECT 之间可以插队 — campusStats.total 跟 deptStats.total 相加能差
+  //   之后：better-sqlite3 的 transaction() 同步原子执行，外部并发写会被串行化
+  const stats = db.transaction(() => {
   const total = db.prepare(`SELECT COUNT(*) as c FROM schedules WHERE ${where}`).get(...params).c;
   const campusStats = db.prepare(`SELECT campus_code as code, campus_name as name, COUNT(*) as count
                                   FROM schedules WHERE ${where}
@@ -179,7 +184,7 @@ app.get('/api/statistics', requireAuth, asyncHandler(async (req, res) => {
 
   // 基础数据统计
   const meta = getAllMetadata({});
-  res.json(ok({
+  return {
     totalSchedules: total,
     campusStats,
     slotStats,
@@ -194,7 +199,9 @@ app.get('/api/statistics', requireAuth, asyncHandler(async (req, res) => {
     totalRooms: meta.rooms.length,
     totalZones: meta.zones.length,
     totalTimeSlots: meta.timeSlots.length
-  }));
+  };
+  })();
+  res.json(ok(stats));
 }));
 
 // 导出排班为 CSV（流式输出）
@@ -353,11 +360,74 @@ app.get('/api/version', (req, res) => {
   });
 });
 
+// #Audit#16 修复：客户端日志接收端点（sendBeacon POST /api/client-log）
+//   用途：浏览器 / 小程序前端在 4xx/5xx / console.error 时把上下文外发
+//   实现：直接写文件 ./data/client-log.ndjson（按行 JSON），定时 rotate
+//   鉴权：不强制（公开端点，靠 IP+UA 限速），但写入容量限制每条 8KB
+const fs2 = require('fs');
+const CLIENT_LOG_PATH = process.env.CLIENT_LOG_PATH || path.join(__dirname, 'data', 'client-log.ndjson');
+const CLIENT_LOG_MAX_BYTES = 8 * 1024; // 8KB
+try { fs2.mkdirSync(path.dirname(CLIENT_LOG_PATH), { recursive: true }); } catch (_) {}
+const _clientLogLimiter = new Map(); // IP -> { count, resetAt }
+function _clientLogAllow(ip) {
+  const now = Date.now();
+  const win = _clientLogLimiter.get(ip);
+  if (!win || now > win.resetAt) {
+    _clientLogLimiter.set(ip, { count: 1, resetAt: now + 60_000 });
+    return true;
+  }
+  if (win.count >= 60) return false; // 每 IP 每分钟 60 条上限
+  win.count++;
+  return true;
+}
+app.post('/api/client-log', (req, res) => {
+  try {
+    const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+    if (!_clientLogAllow(ip)) return res.status(429).end();
+    let body = req.body;
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch (_) { return res.status(400).end(); }
+    }
+    const line = JSON.stringify({
+      ip, ua: req.headers['user-agent'] || '',
+      receivedAt: new Date().toISOString(),
+      ...body
+    });
+    if (line.length > CLIENT_LOG_MAX_BYTES) return res.status(413).end();
+    fs2.appendFile(CLIENT_LOG_PATH, line + '\n', () => {});
+    res.status(204).end();
+  } catch (e) {
+    res.status(500).end();
+  }
+});
+
 // 全局错误处理
 app.use(errorMiddleware());
 
 // 启动
 initDb().then(() => {
+  // #P0-2 / #P2-18 修复：多实例部署告警
+  //   - 进程内 Map（memory）→ 限流桶 / token 黑名单 / 登录失败桶 重启即清零、跨进程不共享
+  //   - 单实例 + 开发环境 用 memory OK
+  //   - 生产环境 **强烈建议** STORE_BACKEND=sqlite（或后续换 Redis）
+  //   - 不阻断启动（兼容开发），但打 warn 让运维一眼看见
+  const backend = (process.env.STORE_BACKEND || 'memory').toLowerCase();
+  if (backend === 'memory' && process.env.NODE_ENV === 'production') {
+    log.warn('store.using.memory', {
+      hint: '生产环境推荐 STORE_BACKEND=sqlite — 否则限流/黑名单/登录失败桶 多实例不共享、重启即清零',
+      docs: 'https://github.com/peterpzj/schedule-admin/blob/main/admin/DEPLOY_DONE.md'
+    });
+  } else if (backend === 'memory') {
+    log.info('store.using.memory', { note: '开发环境用内存即可' });
+  } else {
+    log.info('store.using.shared', { backend });
+  }
+
+  // #B26 修复：定时清理孤儿上传文件，每小时一次
+  //   之前：只启动时清一次（cleanupStaleUploads() 在 excel.js 启动时跑）
+  //   之后：每小时 setInterval 兜底，防止长时间运行累积 /uploads 垃圾
+  setInterval(cleanupStaleUploads, 3600 * 1000);
+
   app.listen(PORT, '0.0.0.0', () => {
     log.info('server.started', { port: PORT, env: process.env.NODE_ENV || 'development' });
   });

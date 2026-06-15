@@ -128,6 +128,14 @@ function createCrudRouter(table, config = {}) {
 
   // 修改
   router.put('/:id', requireAuth, (req, res) => {
+    // #B4 修复：minip 传来字符串 id（work_id/code 等），与整数主键 id 列不匹配
+    //   短期止血：按 lookupCol 查回整数 id
+    if (req.params.id && !/^\d+$/.test(req.params.id)) {
+      const lookupCol = table === 'doctors' ? 'work_id' : 'code';
+      const row = getDb().prepare('SELECT id FROM ' + table + ' WHERE ' + lookupCol + ' = ?').get(req.params.id);
+      if (row) req.params.id = row.id;
+      else return res.status(404).json({ success: false, code: 'NOT_FOUND', error: '记录不存在' });
+    }
     const body = req.body || {};
     if (allowedFields.length > 0) {
       const fields = allowedFields;
@@ -148,6 +156,14 @@ function createCrudRouter(table, config = {}) {
 
   // 删除（仅 admin）
   router.delete('/:id', requireAuth, requireRole(PERMISSIONS.ADMIN_SYSTEM), (req, res) => {
+    // #B4 修复：minip 传来字符串 id（work_id/code 等），与整数主键 id 列不匹配
+    //   短期止血：按 lookupCol 查回整数 id
+    if (req.params.id && !/^\d+$/.test(req.params.id)) {
+      const lookupCol = table === 'doctors' ? 'work_id' : 'code';
+      const row = getDb().prepare('SELECT id FROM ' + table + ' WHERE ' + lookupCol + ' = ?').get(req.params.id);
+      if (row) req.params.id = row.id;
+      else return res.status(404).json({ success: false, code: 'NOT_FOUND', error: '记录不存在' });
+    }
     const db = getDb();
     try {
       // 1) 取被删记录的 lookup 字段（用 code；doctors 用 id 已在 lookupColumn 体现）

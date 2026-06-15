@@ -33,7 +33,9 @@ function toApiRow(row) {
   if (!row) return null;
   const o = toApi(row);
   o._id = row.id;
-  o.campus = row.campus_name;
+  o.campus = row.campus_name;        // 老别名,保留兼容
+  o.campus_name = row.campus_name;   // B11 新增:前端 rowToEditing 读这个
+  o.campusName = row.campus_name;    // B11 新增:camelCase 别名
   return o;
 }
 
