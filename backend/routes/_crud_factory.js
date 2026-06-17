@@ -7,7 +7,7 @@ const { getDb } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const requireRole = require('../middleware/requireRole');
 const { audit } = require('../middleware/audit');
-const { ERR, biz } = require('../lib/errors');
+const { ERR, biz, ok } = require('../lib/errors');
 const { PERMISSIONS } = require('../lib/roles');
 
 /**
@@ -88,7 +88,7 @@ function createCrudRouter(table, config = {}) {
       'SELECT * FROM ' + table + ' WHERE ' + where + ' ORDER BY ' + sortBy + ' ' + sortOrder + ' LIMIT ? OFFSET ?'
     ).all(...params, pageSize, offset);
 
-    res.json({ success: true, data: list, total, page, pageSize });
+    res.json(ok({ data: list, total, page, pageSize }));
   });
 
   // 详情
