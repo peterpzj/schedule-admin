@@ -611,18 +611,18 @@ async function onExport() {
 // ============ #P1-13 重型版：排班快速上传 ============
 
 /**
- * 下载排班模板（仅 1 个 sheet：排班表）
- * 后端 /api/excel/template 返回多 sheet 全量模板；这里只关心排班 sheet
- * 为简洁复用 /excel/template 下载，admin 自己筛选。
- * 但更轻量的做法：前端用 SheetJS 动态生成单 sheet 模板。
- * 这里用最简方案：提示用户从 8 sheet 模板里拿「排班」sheet
+ * 下载排班专用单 sheet 模板（推荐）
+ * 后端 /api/excel/schedule-template 返回单 sheet「排班」+ 使用说明
+ * 比 /excel/template 更轻量,字段专为排班
  */
-function onDownloadScheduleTemplate() {
-  ElMessageBox.confirm(
-    '单 sheet「排班表」模板暂未提供独立下载入口。\n\n推荐操作：\n1) 点击下方「下载标准模板」拿 8 sheet 全量模板\n2) 只需填「排班」sheet 后另存为新文件\n3) 用上方「选择文件 → 上传导入」即可\n\n是否要下载标准模板？',
-    '提示',
-    { confirmButtonText: '下载标准模板', cancelButtonText: '取消', type: 'info' }
-  ).then(() => onDownloadTemplate()).catch(() => {})
+async function onDownloadScheduleTemplate() {
+  try {
+    const blob = await apiDownload('/excel/schedule-template')
+    saveBlob(blob, '排班模板.xlsx')
+    ElMessage.success('排班模板下载成功')
+  } catch (e) {
+    ElMessage.error('排班模板下载失败：' + (e.message || '未知'))
+  }
 }
 
 function onScheduleFileChange(file) {

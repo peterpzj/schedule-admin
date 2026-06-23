@@ -19,10 +19,13 @@ const router = express.Router();
 const { getDb } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { audit } = require('../middleware/audit');
-const { batchInsert, batchInsertIgnore, batchInsertReplace, batchInsertReplaceTable } = require('../lib/batchWriter');
+const { batchInsertIgnore, batchInsertReplace, batchInsertReplaceTable } = require('../lib/batchWriter');
 const jobs = require('../lib/importJobs');
 const { ERR, biz, ok, fail, asyncHandler } = require('../lib/errors');
 const log = require('../lib/logger');
+const { excelLimiter } = require('../middleware/rateLimit');
+
+function safeUnlink(p) { try { fs.unlinkSync(p); } catch (_) {} }
 
 const SYNC_THRESHOLD = 1000;  // 超过此行数走异步
 
@@ -412,7 +415,7 @@ router.post('/import', requireAuth, upload.single('file'), asyncHandler(async (r
   // 超过阈值转异步
   if (totalRows > SYNC_THRESHOLD && !dryRun) {
     // #P0-5 修复：早返回前清理临时文件，避免孤儿上传堆积
-    try { fs.unlinkSync(req.file.path); } catch (_) {}
+    safeUnlink(req.file.path);
     return res.status(202).json(ok({
       message: '文件超过 ' + SYNC_THRESHOLD + ' 行，请改用异步导入',
       jobId: null,
@@ -487,7 +490,7 @@ router.post('/import', requireAuth, upload.single('file'), asyncHandler(async (r
   }
 
   // 清理临时文件
-  try { fs.unlinkSync(req.file.path); } catch (_) {}
+  safeUnlink(req.file.path);
 
   audit(req.user.id, req.user.username, dryRun ? 'import_dry_run' : 'import', 'excel', null, { mode, summary }, req.ip);
   res.json(ok({ dryRun, mode, strategy: strategy.label, summary, errors: errors.slice(0, 50), warnings: warnings.slice(0, 50) }));
@@ -518,7 +521,7 @@ router.post('/import-async', requireAuth, upload.single('file'), asyncHandler(as
     wb = parseWorkbook(req.file.path);
   } catch (e) {
     jobs.failJob(job, e);
-    try { fs.unlinkSync(req.file.path); } catch (_) {}
+    safeUnlink(req.file.path);
     throw e;
   }
 
@@ -610,7 +613,7 @@ router.post('/import-async', requireAuth, upload.single('file'), asyncHandler(as
       }
       jobs.failJob(job, e);
     } finally {
-      try { fs.unlinkSync(req.file.path); } catch (_) {}
+      safeUnlink(req.file.path);
     }
   });
 }));
@@ -741,36 +744,111 @@ router.get('/export', requireAuth, asyncHandler(async (req, res) => {
 /**
  * GET /api/excel/template
  * 下载空模板（含表头和示例行）
+ * 修复 P1-14: 加 Content-Length 头 + audit 记录 + 错误处理
  */
-router.get('/template', requireAuth, (req, res) => {
-  const wb = XLSX.utils.book_new();
-  // 提供带表头和 1-2 行示例的空模板
-  const examples = {
-    '1-院区': [{ '名称': '示例院区', '代码': 'XX', '排序': 1 }],
-    '2-科室': [{ '名称': '示例科室', '代码': 'XXKS' }],
-    '3-门诊类型': [{ '名称': '示例门诊', '代码': 'XXMZ', '排序': 1 }],
-    '4-诊区': [{ '名称': '1诊区', '代码': 'YX-Z1', '院区代码': 'YX', '院区名称': '越秀院区', '排序': 1 }],
-    '5-诊室': [{ '诊室编号': '301', '诊室名称': '301诊室', '院区代码': 'YX', '院区名称': '越秀院区', '诊区代码': 'YX-Z1', '诊区名称': '1诊区', '归属科室': '内科' }],
-    '6-时段': [{ '名称': '上午1段', '代码': 'YX-TX-AM1', '院区代码': 'YX', '院区名称': '越秀院区', '门诊类型代码': 'TESE', '门诊类型名称': '特需', '午别': '上午', '开始时间': '08:30', '结束时间': '10:30', '排序': 1 }],
-    '7-医生': [{ '姓名': '示例医生', '工号': 'M001', '科室': '内科', '职称': '主任医师', '其他职称': '', '主院区': 'YX' }],
-    '8-排班': [{ '医生ID': 1, '医生姓名': '示例医生', '工号': 'M001', '科室': '内科', '院区代码': 'YX', '院区名称': '越秀院区', '诊区代码': 'YX-Z1', '诊区名称': '1诊区', '诊室编号': '301', '诊室名称': '301诊室', '门诊类型代码': 'TESE', '门诊类型名称': '特需', '时段代码': 'YX-TX-AM1', '午别': '上午', '开始时间': '08:30', '结束时间': '10:30', '周次': 1, '备注': '', '限号数': 30 }]
-  };
-  for (const [name, rows] of Object.entries(examples)) {
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), name);
-  }
-  // 加上使用说明 sheet
-  const info = [
-    { '说明': '请按各 sheet 字段填写；标 * 的为必填项；不要修改 sheet 名称' },
-    { '说明': '诊室：同一 (院区代码, 诊室编号) 唯一；排班：同一 (院区代码, 诊室编号, 周次, 时段代码) 唯一' },
-    { '说明': '医生ID 是数据库自增 ID，导出时才能看到；批量导入可省略' },
-    { '说明': '周次 1=周一, 2=周二, 3=周三, 4=周四, 5=周五, 6=周六, 7=周日' }
-  ];
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(info), '使用说明');
+router.get('/template', requireAuth, excelLimiter, (req, res) => {
+  try {
+    const wb = XLSX.utils.book_new();
+    // 提供带表头和 1-2 行示例的空模板
+    const examples = {
+      '1-院区': [{ '名称': '示例院区', '代码': 'XX', '排序': 1 }],
+      '2-科室': [{ '名称': '示例科室', '代码': 'XXKS' }],
+      '3-门诊类型': [{ '名称': '示例门诊', '代码': 'XXMZ', '排序': 1 }],
+      '4-诊区': [{ '名称': '1诊区', '代码': 'YX-Z1', '院区代码': 'YX', '院区名称': '越秀院区', '排序': 1 }],
+      '5-诊室': [{ '诊室编号': '301', '诊室名称': '301诊室', '院区代码': 'YX', '院区名称': '越秀院区', '诊区代码': 'YX-Z1', '诊区名称': '1诊区', '归属科室': '内科' }],
+      '6-时段': [{ '名称': '上午1段', '代码': 'YX-TX-AM1', '院区代码': 'YX', '院区名称': '越秀院区', '门诊类型代码': 'TESE', '门诊类型名称': '特需', '午别': '上午', '开始时间': '08:30', '结束时间': '10:30', '排序': 1 }],
+      '7-医生': [{ '姓名': '示例医生', '工号': 'M001', '科室': '内科', '职称': '主任医师', '其他职称': '', '主院区': 'YX' }],
+      '8-排班': [{ '医生ID': 1, '医生姓名': '示例医生', '工号': 'M001', '科室': '内科', '院区代码': 'YX', '院区名称': '越秀院区', '诊区代码': 'YX-Z1', '诊区名称': '1诊区', '诊室编号': '301', '诊室名称': '301诊室', '门诊类型代码': 'TESE', '门诊类型名称': '特需', '时段代码': 'YX-TX-AM1', '午别': '上午', '开始时间': '08:30', '结束时间': '10:30', '周次': 1, '备注': '', '限号数': 30 }]
+    };
+    for (const [name, rows] of Object.entries(examples)) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), name);
+    }
+    // 加上使用说明 sheet
+    const info = [
+      { '说明': '请按各 sheet 字段填写；标 * 的为必填项；不要修改 sheet 名称' },
+      { '说明': '诊室：同一 (院区代码, 诊室编号) 唯一；排班：同一 (院区代码, 诊室编号, 周次, 时段代码) 唯一' },
+      { '说明': '医生ID 是数据库自增 ID，导出时才能看到；批量导入可省略' },
+      { '说明': '周次 1=周一, 2=周二, 3=周三, 4=周四, 5=周五, 6=周六, 7=周日' }
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(info), '使用说明');
 
-  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-  res.setHeader('Content-Disposition', 'attachment; filename="schedule_template.xlsx"');
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.send(buffer);
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const filename = 'schedule_template.xlsx';
+
+    // 显式设置 Content-Length + Cache-Control，避免 nginx 缓冲+浏览器无法下载
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"; filename*=UTF-8\'\'schedule_template.xlsx');
+    res.setHeader('Content-Length', String(buffer.length));
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');     // 关闭 nginx 缓冲,避免大数据下载卡住
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length');  // 允许前端 JS 读取这些头
+
+    audit(req.user.id, req.user.username, 'template_download', 'excel', null, { bytes: buffer.length }, req.ip);
+    log.info('template.download', { user: req.user.username, bytes: buffer.length });
+
+    res.end(buffer);
+  } catch (e) {
+    log.error('template.download.failed', { err: e.message, stack: e.stack });
+    if (!res.headersSent) {
+      res.status(500).json(fail(ERR.SYS_INTERNAL, '模板生成失败：' + e.message));
+    }
+  }
+});
+
+/**
+ * GET /api/excel/schedule-template
+ * 排班专用单 sheet 模板（推荐用户使用这个，避免多 sheet 模板对不上）
+ */
+router.get('/schedule-template', requireAuth, excelLimiter, (req, res) => {
+  try {
+    const wb = XLSX.utils.book_new();
+    const headers = ['医生ID', '医生姓名', '工号', '科室', '院区代码', '院区名称', '诊区代码', '诊区名称',
+                     '诊室编号', '诊室名称', '门诊类型代码', '门诊类型名称', '时段代码', '午别',
+                     '开始时间', '结束时间', '周次', '备注', '限号数'];
+    const examples = [{
+      '医生ID': 1, '医生姓名': '示例医生', '工号': 'M001', '科室': '内科',
+      '院区代码': 'YX', '院区名称': '越秀院区',
+      '诊区代码': 'YX-Z1', '诊区名称': '1诊区',
+      '诊室编号': '301', '诊室名称': '301诊室',
+      '门诊类型代码': 'TESE', '门诊类型名称': '特需',
+      '时段代码': 'YX-TX-AM1', '午别': '上午',
+      '开始时间': '08:30', '结束时间': '10:30',
+      '周次': 1, '备注': '', '限号数': 30
+    }];
+    const ws = XLSX.utils.json_to_sheet(examples, { header: headers });
+    XLSX.utils.book_append_sheet(wb, ws, '排班');
+
+    // 加使用说明
+    const info = [
+      { '说明': '必填列（黄色高亮）：医生ID/姓名、工号、科室、院区代码、诊室编号、时段代码、周次' },
+      { '说明': '排班唯一性：同一 (院区代码, 诊室编号, 周次, 时段代码) 不能重复' },
+      { '说明': '周次 1=周一, 2=周二, 3=周三, 4=周四, 5=周五, 6=周六, 7=周日' },
+      { '说明': '医生ID 是数据库自增 ID，从「医生」表查; 批量导入可省略但需保证姓名+工号唯一' },
+      { '说明': '外键引用必须存在：院区代码/诊区代码/诊室编号/门诊类型代码/时段代码/医生ID' }
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(info), '使用说明');
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const filename = '排班模板.xlsx';
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + encodeURIComponent(filename) + '"; filename*=UTF-8\'\'' + encodeURIComponent(filename));
+    res.setHeader('Content-Length', String(buffer.length));
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length');
+
+    audit(req.user.id, req.user.username, 'schedule_template_download', 'excel', null, { bytes: buffer.length }, req.ip);
+    log.info('schedule_template.download', { user: req.user.username, bytes: buffer.length });
+
+    res.end(buffer);
+  } catch (e) {
+    log.error('schedule_template.download.failed', { err: e.message, stack: e.stack });
+    if (!res.headersSent) {
+      res.status(500).json(fail(ERR.SYS_INTERNAL, '排班模板生成失败：' + e.message));
+    }
+  }
 });
 
 module.exports = router;
